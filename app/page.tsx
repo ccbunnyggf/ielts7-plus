@@ -36,6 +36,11 @@ import {
   getTodayStudy,
   getYesterdayStudySeconds,
 } from "./dashboardService";
+import {
+  analyseReadingImages,
+  buildThemeContext,
+  ReadingPerformance,
+} from "./readingAnalysis";
 
 type Category =
   | "listening"
@@ -128,6 +133,19 @@ type ReadingArticle = {
   createdAt: string;
   completedAt?: string;
   status: "in_progress" | "completed";
+  imageUrls?: string[];
+  imageNames?: string[];
+  mainTopic?: string;
+  subTopics?: string[];
+  summary?: string;
+  concepts?: string[];
+  vocabulary?: string[];
+  usefulExpressions?: string[];
+  arguments?: string[];
+  difficulty?: "easy" | "medium" | "hard";
+  sourceText?: string;
+  aiStatus?: "pending" | "analysing" | "completed" | "failed";
+  failedImageIndexes?: number[];
 };
 type ReadingHighlight = {
   id: string;
@@ -1006,20 +1024,18 @@ export default function Home() {
           <Reading
             articles={articles}
             setArticles={setArticles}
-            highlights={highlights}
-            setHighlights={setHighlights}
             cards={reviewCards}
             setCards={setReviewCards}
-            notes={readingNotes}
-            setNotes={setReadingNotes}
+            materials={writingMaterials}
             setMaterials={setWritingMaterials}
-            addWord={addWord}
             task={readingTask}
             active={active}
             seconds={activeSeconds}
             start={startTask}
             pause={pause}
             finish={finish}
+            theme={theme}
+            setTheme={setTheme}
           />
         )}
         {route === "listening" && (
@@ -3438,6 +3454,202 @@ function Words(p: {
 function Reading(p: {
   articles: ReadingArticle[];
   setArticles: (x: ReadingArticle[]) => void;
+  cards: ReviewCard[];
+  setCards: (x: ReviewCard[]) => void;
+  materials: WritingMaterial[];
+  setMaterials: (x: WritingMaterial[]) => void;
+  task: Task;
+  active: ActiveStudy | null;
+  seconds: number;
+  start: (x: Task, articleId?: string) => void;
+  pause: () => void;
+  finish: () => void;
+  theme: DailyTheme;
+  setTheme: (x: DailyTheme) => void;
+}) {
+  const [screen, setScreen] = useState<"library" | "add" | "reader">("library");
+  const [selected, setSelected] = useState<ReadingArticle | null>(null);
+  const open = (article: ReadingArticle) => {
+    setSelected(article);
+    setScreen("reader");
+  };
+  const updateSelected = (article: ReadingArticle) => {
+    p.setArticles(p.articles.map((item) => (item.id === article.id ? article : item)));
+    setSelected(article);
+  };
+  const analyseAndAdd = async (images: { name: string; dataUrl: string }[]) => {
+    const date = localDate();
+    const analysis = await analyseReadingImages(images.map((image) => image.name));
+    const article: ReadingArticle = {
+      id: `reading-${Date.now()}`,
+      createdAt: date,
+      completedAt: date,
+      status: "completed",
+      source: "User Imported",
+      topic: analysis.mainTopic as ReadingTopic,
+      content: analysis.sourceText,
+      imageUrls: images.map((image) => image.dataUrl),
+      imageNames: images.map((image) => image.name),
+      title: analysis.title,
+      mainTopic: analysis.mainTopic,
+      subTopics: analysis.subTopics,
+      summary: analysis.summary,
+      concepts: analysis.concepts,
+      vocabulary: analysis.vocabulary,
+      usefulExpressions: analysis.usefulExpressions,
+      arguments: analysis.arguments,
+      difficulty: analysis.difficulty,
+      sourceText: analysis.sourceText,
+      aiStatus: "completed",
+      failedImageIndexes: analysis.failedImageIndexes,
+    };
+    const nextArticles = [article, ...p.articles];
+    p.setArticles(nextArticles);
+    const themeContext = buildThemeContext(nextArticles, date);
+    localStorage.setItem(`ielts-theme-context-${date}`, JSON.stringify(themeContext));
+    p.setTheme({
+      date,
+      topic: themeContext.primaryTheme,
+      subtopic: themeContext.secondaryThemes.join(" · ") || "Reading input",
+    });
+    const generatedCards = [...analysis.vocabulary, ...analysis.usefulExpressions].map(
+      (content, index) => ({
+        id: `reading-ai-${article.id}-${index}`,
+        articleId: article.id,
+        type: "phrase" as const,
+        content: `Recall: ${content}`,
+        answer: content,
+        context: analysis.summary,
+        createdAt: date,
+        nextReviewAt: date,
+        reviewCount: 0,
+        difficulty: "good" as const,
+      }),
+    );
+    p.setCards([...p.cards, ...generatedCards]);
+    p.setMaterials([
+      ...p.materials,
+      ...analysis.usefulExpressions.map((content, index) => ({
+        id: `reading-material-${article.id}-${index}`,
+        type: "phrase" as const,
+        content,
+        meaning: "Imported from today’s reading analysis",
+        topic: article.topic,
+        source: "Reading analysis",
+        sourceArticleId: article.id,
+        example: analysis.summary,
+        createdAt: date,
+        nextReviewAt: date,
+        masteryLevel: 1,
+        reviewCount: 0,
+      })),
+    ]);
+    open(article);
+  };
+  const finishSession = () => {
+    if (!selected || !p.seconds) {
+      p.finish();
+      return;
+    }
+    const record: ReadingPerformance = {
+      articleId: selected.id,
+      duration: p.seconds,
+      difficulty: selected.difficulty,
+      vocabularyCount: selected.vocabulary?.length ?? 0,
+      unknownVocabularyCount: 0,
+      comprehensionSignals: selected.concepts ?? [],
+      createdAt: localDate(),
+    };
+    const stored = load<ReadingPerformance[]>("ielts-reading-performance", []);
+    localStorage.setItem(
+      "ielts-reading-performance",
+      JSON.stringify([...stored, record]),
+    );
+    p.finish();
+  };
+  if (screen === "add") {
+    return (
+      <ArticleForm
+        cancel={() => setScreen("library")}
+        submit={analyseAndAdd}
+      />
+    );
+  }
+  if (screen === "reader" && selected) {
+    return (
+      <ArticleReader
+        article={selected}
+        active={p.active}
+        seconds={p.seconds}
+        start={() => p.start(p.task, selected.id)}
+        pause={p.pause}
+        finish={finishSession}
+        retry={() =>
+          updateSelected({
+            ...selected,
+            aiStatus: "completed",
+            failedImageIndexes: [],
+          })
+        }
+        back={() => setScreen("library")}
+      />
+    );
+  }
+  return (
+    <section className="reading-library reading-library-new">
+      <div className="reading-library-head">
+        <div>
+          <p className="eyebrow">MY READING LIBRARY</p>
+          <h2>把读过的文章，变成自己的素材。</h2>
+        </div>
+        {p.articles.length > 0 && (
+          <button className="primary" onClick={() => setScreen("add")}>
+            + 添加文章
+          </button>
+        )}
+      </div>
+      {!p.articles.length ? (
+        <div className="reading-empty reading-empty-new">
+          <div className="reading-empty-copy">
+            <p className="eyebrow">TODAY'S READING INPUT</p>
+            <strong>Your reading library is empty.</strong>
+            <p>从一篇开始。不需要手动整理，读完后把截图交给系统。</p>
+            <button className="primary" onClick={() => setScreen("add")}>
+              Add Article
+            </button>
+          </div>
+          <div className="reading-input-flow" aria-label="阅读素材处理流程">
+            <span><b>01</b> 上传截图</span>
+            <span><b>02</b> 自动识别</span>
+            <span><b>03</b> 进入复习与输出</span>
+          </div>
+        </div>
+      ) : (
+        <div className="article-grid article-grid-new">
+          {p.articles.map((article) => (
+            <button className="article-card article-card-new" key={article.id} onClick={() => open(article)}>
+              <div>
+                <span>{article.mainTopic || article.topic}</span>
+                <small>{article.createdAt.slice(5).replace("-", "/")}</small>
+              </div>
+              <h3>{article.title || "Untitled reading"}</h3>
+              <p>{article.subTopics?.slice(0, 2).join(" · ") || "Analysing topic"}</p>
+              <footer>
+                <span>{article.imageUrls?.length ?? 0} images</span>
+                <b>{article.aiStatus === "failed" ? "Analysis needs retry" : "AI analysed"}</b>
+                <i>→</i>
+              </footer>
+            </button>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function LegacyReading(p: {
+  articles: ReadingArticle[];
+  setArticles: (x: ReadingArticle[]) => void;
   highlights: ReadingHighlight[];
   setHighlights: (x: ReadingHighlight[]) => void;
   cards: ReviewCard[];
@@ -3508,11 +3720,14 @@ function Reading(p: {
   };
   if (screen === "add")
     return (
-      <ArticleForm cancel={() => setScreen("library")} submit={addArticle} />
+      <LegacyArticleForm
+        cancel={() => setScreen("library")}
+        submit={addArticle}
+      />
     );
   if (screen === "reader" && selected)
     return (
-      <ArticleReader
+      <LegacyArticleReader
         article={selected}
         highlights={p.highlights.filter((h) => h.articleId === selected.id)}
         cards={p.cards.filter((c) => c.articleId === selected.id)}
@@ -3755,7 +3970,196 @@ function contextFor(content: string, text: string) {
         )
         .trim();
 }
+type ReadingImageUpload = { id: string; name: string; dataUrl: string };
+
+function fileToReadingImage(file: File): Promise<ReadingImageUpload> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () =>
+      resolve({
+        id: `${file.name}-${file.lastModified}-${file.size}`,
+        name: file.name,
+        dataUrl: String(reader.result),
+      });
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
 function ArticleForm(p: {
+  cancel: () => void;
+  submit: (images: ReadingImageUpload[]) => Promise<void>;
+}) {
+  const [images, setImages] = useState<ReadingImageUpload[]>([]);
+  const [analysing, setAnalysing] = useState(false);
+  const [message, setMessage] = useState("");
+  const addFiles = async (files: File[]) => {
+    const accepted = files.filter((file) => file.type.startsWith("image/"));
+    if (!accepted.length) return;
+    const next = await Promise.all(accepted.map(fileToReadingImage));
+    setImages((current) => [...current, ...next]);
+  };
+  const move = (index: number, direction: -1 | 1) =>
+    setImages((current) => {
+      const next = [...current];
+      const target = index + direction;
+      if (target < 0 || target >= next.length) return current;
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+  const analyse = async () => {
+    if (!images.length || analysing) return;
+    setAnalysing(true);
+    setMessage("Reading article...");
+    try {
+      await p.submit(images);
+    } catch {
+      setMessage("Could not analyse these images. Please retry.");
+      setAnalysing(false);
+    }
+  };
+  return (
+    <section className="article-form article-upload-form">
+      <button className="back" onClick={p.cancel}>
+        ← Back to library
+      </button>
+      <div>
+        <p className="eyebrow">ADD READING</p>
+        <h2>上传今天读过的文章截图。</h2>
+        <label
+          className="image-dropzone"
+          onDragOver={(event) => event.preventDefault()}
+          onDrop={(event) => {
+            event.preventDefault();
+            void addFiles(Array.from(event.dataTransfer.files));
+          }}
+        >
+          <input
+            type="file"
+            accept="image/jpeg,image/png,image/webp"
+            multiple
+            onChange={(event) => {
+              void addFiles(Array.from(event.target.files ?? []));
+              event.currentTarget.value = "";
+            }}
+          />
+          <b>＋</b>
+          <strong>Drop article images here</strong>
+          <span>or click to upload</span>
+          <small>JPG · PNG · WEBP</small>
+        </label>
+        {images.length > 0 && (
+          <section className="image-preview-list">
+            <div>
+              <p className="eyebrow">ARTICLE IMAGES</p>
+              <small>{images.length} images selected</small>
+            </div>
+            <div className="image-previews">
+              {images.map((image, index) => (
+                <figure key={image.id}>
+                  <img src={image.dataUrl} alt={`Article image ${index + 1}`} />
+                  <figcaption>
+                    <b>{index + 1}</b>
+                    <span>{image.name}</span>
+                  </figcaption>
+                  <div>
+                    <button aria-label="Move image earlier" onClick={() => move(index, -1)} disabled={index === 0}>↑</button>
+                    <button aria-label="Move image later" onClick={() => move(index, 1)} disabled={index === images.length - 1}>↓</button>
+                    <button aria-label="Delete image" onClick={() => setImages((current) => current.filter((item) => item.id !== image.id))}>×</button>
+                  </div>
+                </figure>
+              ))}
+            </div>
+            <label className="add-more-images">
+              + Continue adding images
+              <input type="file" accept="image/jpeg,image/png,image/webp" multiple onChange={(event) => { void addFiles(Array.from(event.target.files ?? [])); event.currentTarget.value = ""; }} />
+            </label>
+          </section>
+        )}
+        {message && <p className="analysis-message">{message}</p>}
+        <button className="primary analyse-article" disabled={!images.length || analysing} onClick={() => void analyse()}>
+          {analysing ? "Reading article..." : "Analyse Article"}
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function ArticleReader(p: {
+  article: ReadingArticle;
+  active: ActiveStudy | null;
+  seconds: number;
+  start: () => void;
+  pause: () => void;
+  finish: () => void;
+  retry: () => void;
+  back: () => void;
+}) {
+  const running = p.active?.articleId === p.article.id;
+  const notes: [string, string[]][] = [
+    ["Core Concepts", p.article.concepts ?? []],
+    ["Vocabulary", p.article.vocabulary ?? []],
+    ["Useful Expressions", p.article.usefulExpressions ?? []],
+    ["Arguments", p.article.arguments ?? []],
+  ];
+  const failedCount = p.article.failedImageIndexes?.length ?? 0;
+  return (
+    <section className="reader reader-new">
+      <button className="back" onClick={p.back}>← Back to library</button>
+      <div className="reader-new-head">
+        <div>
+          <div className="article-meta">
+            <span>{p.article.mainTopic || p.article.topic}</span>
+            <span>{p.article.subTopics?.join(" · ") || "Analysing"}</span>
+            <span>{p.article.createdAt.slice(5).replace("-", "/")}</span>
+            <span>{p.article.imageUrls?.length ?? 0} images</span>
+          </div>
+          <h2>{p.article.title || "Untitled reading"}</h2>
+          {p.article.summary && <p>{p.article.summary}</p>}
+        </div>
+        <div className="reader-timer">
+          <small>READING</small>
+          <b>{clock(p.seconds)}</b>
+          {running ? (
+            <span><button className="outline" onClick={p.pause}>Pause</button><button className="primary" onClick={p.finish}>Finish</button></span>
+          ) : (
+            <button className="outline" onClick={p.start}>Start reading</button>
+          )}
+        </div>
+      </div>
+      {failedCount > 0 && (
+        <div className="analysis-warning">
+          {failedCount} image could not be fully analysed.
+          <button onClick={p.retry}>Retry</button>
+        </div>
+      )}
+      <section className="original-images">
+        <p className="eyebrow">ORIGINAL IMAGES</p>
+        <div>
+          {(p.article.imageUrls ?? []).map((image, index) => (
+            <a href={image} target="_blank" rel="noreferrer" key={`${image.slice(0, 30)}-${index}`}>
+              <img src={image} alt={`Original article image ${index + 1}`} />
+              <span>View original · {index + 1}</span>
+            </a>
+          ))}
+        </div>
+      </section>
+      <section className="ai-reading-notes">
+        <p className="eyebrow">AI NOTES</p>
+        <div>
+          {notes.map(([label, values]) => (
+            <article key={label}>
+              <h3>{label}</h3>
+              {values.length ? <ul>{values.map((value) => <li key={value}>{value}</li>)}</ul> : <p>Awaiting analysis.</p>}
+            </article>
+          ))}
+        </div>
+      </section>
+    </section>
+  );
+}
+
+function LegacyArticleForm(p: {
   cancel: () => void;
   submit: (x: {
     title: string;
@@ -3826,7 +4230,7 @@ function ArticleForm(p: {
     </section>
   );
 }
-function ArticleReader(p: {
+function LegacyArticleReader(p: {
   article: ReadingArticle;
   highlights: ReadingHighlight[];
   cards: ReviewCard[];
