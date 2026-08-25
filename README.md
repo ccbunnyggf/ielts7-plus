@@ -34,6 +34,18 @@ npm run dev
 npm run build
 ```
 
+## Deploy to Cloudflare Workers
+
+This project uses the Cloudflare Vite plugin and deploys as a Cloudflare Worker
+with static assets. After logging in to Cloudflare with Wrangler, run:
+
+```bash
+pnpm run deploy
+```
+
+The command builds the application first and then deploys the generated Worker.
+Do not configure this project as a standard Next.js site on Netlify.
+
 ## Data backup
 
 Use **Settings → Export Data** to download a JSON backup, and **Import Data** to restore it in another browser or after clearing local data.
