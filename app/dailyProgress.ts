@@ -1,5 +1,5 @@
-export type DailyProgressPoint={date:string;score:number;delta:number;status:'up'|'down'|'flat';reason:string;message:string;recoveryInfluence?:number;forgetInfluence?:number};
-export type DailyProgressCandle={date:string;open:number;high:number;low:number;close:number;delta:number;insight:string;reason:string;recoveryInfluence:number;forgetInfluence:number};
+export type DailyProgressPoint={date:string;score:number;delta:number;status:'up'|'down'|'flat';reason:string;message:string;recoveryInfluence?:number;forgetInfluence?:number;settledAt?:string};
+export type DailyProgressCandle={date:string;open:number;high:number;low:number;close:number;delta:number;insight:string;reason:string;recoveryInfluence:number;forgetInfluence:number;settledAt?:string};
 type Input={date:string;sessions:{date:string;category:string;duration:number}[];tasks:{category:string;completed:boolean;type:string}[];reviews:{timestamp:string;correct:boolean}[];previous?:DailyProgressPoint};
 const clamp=(n:number,min:number,max:number)=>Math.max(min,Math.min(max,n));
 export function calculateDailyProgressScore(input:Input):DailyProgressPoint|null{
@@ -21,6 +21,6 @@ export function toDailyProgressCandles(points:DailyProgressPoint[]):DailyProgres
   const open=index?all[index-1].score:clamp(point.score-point.delta,1,100);
   const close=point.score;
   const recoveryInfluence=point.recoveryInfluence??0,forgetInfluence=point.forgetInfluence??0;
-  return {date:point.date,open,high:clamp(Math.max(open,close)+recoveryInfluence,1,100),low:clamp(Math.min(open,close)-forgetInfluence,1,100),close,delta:close-open,insight:point.message,reason:point.reason,recoveryInfluence,forgetInfluence};
+  return {date:point.date,open,high:clamp(Math.max(open,close)+recoveryInfluence,1,100),low:clamp(Math.min(open,close)-forgetInfluence,1,100),close,delta:close-open,insight:point.message,reason:point.reason,recoveryInfluence,forgetInfluence,settledAt:point.settledAt};
  });
 }

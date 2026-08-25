@@ -28,6 +28,14 @@ import {
   normalizeVocabulary,
 } from "./vocabularyService";
 import { generateSupervisorMessage } from "./supervisor";
+import {
+  getDailyQuote,
+  getDailyQuoteIndex,
+  getNextQuoteIndex,
+  getSkillUpdate,
+  getTodayStudy,
+  getYesterdayStudySeconds,
+} from "./dashboardService";
 
 type Category =
   | "listening"
@@ -365,13 +373,17 @@ function formatMinutes(seconds: number) {
 function clock(seconds: number) {
   return Math.floor(seconds / 60) + ":" + String(seconds % 60).padStart(2, "0");
 }
-function dateHeading() {
+function formatStudyDuration(seconds: number) {
+  return seconds > 0 && seconds < 60 ? "<1m" : formatMinutes(seconds);
+}
+function dateHeading(dateKey: string) {
+  if (!dateKey) return "TODAY";
   return new Intl.DateTimeFormat("en-US", {
     weekday: "long",
     month: "long",
     day: "numeric",
   })
-    .format(new Date())
+    .format(new Date(`${dateKey}T12:00:00`))
     .toUpperCase();
 }
 function initialPlan(date: string): DailyPlan {
@@ -394,7 +406,7 @@ function automaticTheme(date: string): DailyTheme {
 }
 
 export default function Home() {
-  const today = localDate(),
+  const [today, setToday] = useState(""),
     planKey = "ielts-plan-" + today,
     reviewKey = "ielts-review-" + today;
   const [route, setRoute] = useState<
@@ -406,16 +418,16 @@ export default function Home() {
       | "writing"
       | "review"
     >("home"),
-    [plan, setPlan] = useState<DailyPlan>({ date: today, tasks: defaultTasks }),
+    [plan, setPlan] = useState<DailyPlan>(initialPlan("")),
     [sessions, setSessions] = useState<StudySession[]>([]),
     [active, setActive] = useState<ActiveStudy | null>(null),
     [review, setReview] = useState<DailyReview>({
-      date: today,
+      date: "",
       completed: "",
       problem: "",
       tomorrow: "",
     }),
-    [now, setNow] = useState(Date.now()),
+    [now, setNow] = useState(0),
     [words, setWords] = useState(baseWords),
     [word, setWord] = useState(0),
     [reveal, setReveal] = useState(false),
@@ -438,10 +450,19 @@ export default function Home() {
     }),
     [reviewItems, setReviewItems] = useState<ReviewItem[]>([]),
     [reviewLogs, setReviewLogs] = useState<ReviewLog[]>([]),
-    [theme, setTheme] = useState<DailyTheme>(automaticTheme(today)),
+    [theme, setTheme] = useState<DailyTheme>(automaticTheme("")),
     [dailyProgress, setDailyProgress] = useState<DailyProgressPoint[]>([]),
+    [settlementTimeReached, setSettlementTimeReached] = useState(false),
     [ready, setReady] = useState(false);
   useEffect(() => {
+    setToday(localDate());
+    const checkSettlementTime = () => setSettlementTimeReached(new Date().getHours() >= 20);
+    checkSettlementTime();
+    const timer = window.setInterval(checkSettlementTime, 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  useEffect(() => {
+    if (!today) return;
     setPlan(load(planKey, initialPlan(today)));
     setSessions(load("ielts-study-sessions", []));
     setActive(load("ielts-active-study", null));
@@ -693,7 +714,13 @@ export default function Home() {
     ],
   );
   useEffect(() => {
-    if (!ready) return;
+    if (
+      !ready ||
+      !today ||
+      !settlementTimeReached ||
+      dailyProgress.some((point) => point.date === today)
+    )
+      return;
     const previous = dailyProgress
       .filter((x) => x.date < today)
       .sort((a, b) => a.date.localeCompare(b.date))
@@ -707,11 +734,11 @@ export default function Home() {
     });
     if (point)
       setDailyProgress((prev) =>
-        [...prev.filter((x) => x.date !== today), point].sort((a, b) =>
+        [...prev, { ...point, settledAt: new Date().toISOString() }].sort((a, b) =>
           a.date.localeCompare(b.date),
         ),
       );
-  }, [ready, today, sessions, plan.tasks, reviewLogs]);
+  }, [ready, today, settlementTimeReached, sessions, plan.tasks, reviewLogs, dailyProgress]);
   useEffect(() => {
     if (!ready) return;
     const existing = new Set(
@@ -922,11 +949,9 @@ export default function Home() {
       <section className="content">
         <header>
           <div>
-            <p className="eyebrow">{dateHeading()}</p>
-            <h1>
-              {route === "home"
-                ? "今天，继续向前。"
-                : route === "words"
+            <p className="eyebrow">{dateHeading(today)}</p>
+            {route !== "home" && <h1>
+              {route === "words"
                   ? "用得出的词，才是你的词。"
                   : route === "reading"
                     ? "读过的东西，留下来。"
@@ -937,7 +962,7 @@ export default function Home() {
                         : route === "review"
                           ? "先提取，再反馈，再留到长期记忆。"
                           : "专注这一段训练。"}
-            </h1>
+            </h1>}
           </div>
           <button className="avatar" onClick={() => setRoute("home")}>
             L
@@ -1164,10 +1189,7 @@ function Dashboard(p: {
     </section>
   );
   return (
-    <>
-      <ProgressCommand {...p} />
-      <DailyProgressChart points={p.dailyProgress} />
-    </>
+    <QuietOverview {...p} />
   );
 }
 function DailyProgressChart(p: { points: DailyProgressPoint[] }) {
@@ -1733,6 +1755,245 @@ function ProgressCommand(p: {
   */
 }
 function QuietOverview(p: {
+  mastery: ReturnType<typeof calculateProgress>;
+  snapshots: ProgressSnapshot[];
+  allSessions: StudySession[];
+  plan: DailyPlan;
+  dailyProgress: DailyProgressPoint[];
+}) {
+  const [quoteIndex, setQuoteIndex] = useState(() =>
+    getDailyQuoteIndex(p.plan.date),
+  );
+  useEffect(() => {
+    setQuoteIndex(getDailyQuoteIndex(p.plan.date));
+  }, [p.plan.date]);
+  const quote = getDailyQuote(quoteIndex);
+  const study = getTodayStudy(p.allSessions, p.plan.date);
+  const yesterdaySeconds = getYesterdayStudySeconds(p.allSessions, p.plan.date);
+  const studyDelta = study.total - yesterdaySeconds;
+  const skillUpdate = getSkillUpdate(p.mastery.skills, p.snapshots, p.plan.date);
+  return (
+    <section className="dashboard-overview">
+      <article className="daily-quote">
+        <div>
+          <p className="eyebrow">今日词</p>
+          <h2>{quote.keyword}</h2>
+          <blockquote>「{quote.quote}」</blockquote>
+          <small>来源 · {quote.source}</small>
+        </div>
+        <button
+          className="quote-dice"
+          aria-label="随机更换今日签语"
+          onClick={() => setQuoteIndex((index) => getNextQuoteIndex(index))}
+        >
+          ⚄
+        </button>
+      </article>
+
+      <section className="dashboard-section today-study">
+        <div className="dashboard-heading">
+          <p className="eyebrow">TODAY&apos;S STUDY</p>
+          <div>
+            <h2>{formatStudyDuration(study.total)}</h2>
+            {study.total ? (
+              <small className={studyDelta < 0 ? "negative" : "positive"}>
+                {studyDelta >= 0 ? "+" : ""}
+                {formatStudyDuration(Math.abs(studyDelta))} vs yesterday
+              </small>
+            ) : null}
+          </div>
+        </div>
+        {study.total ? (
+          <div className="study-breakdown">
+            {study.rows.map((row) => {
+              const largest = Math.max(...study.rows.map((item) => item.seconds), 1);
+              return (
+                <div className="study-row" key={row.key}>
+                  <span>{row.label}</span>
+                  <i aria-hidden="true">
+                    <b style={{ width: `${(row.seconds / largest) * 100}%` }} />
+                  </i>
+                  <strong>{formatStudyDuration(row.seconds)}</strong>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="dashboard-empty">No sessions yet today.</p>
+        )}
+      </section>
+
+      <section className="dashboard-section skill-update">
+        <div className="dashboard-heading">
+          <p className="eyebrow">AI SKILL UPDATE</p>
+          <small>0–100 SKILL INDEX</small>
+        </div>
+        <div className="skill-index-list">
+          {skillUpdate.rows.map((row) => (
+            <div key={row.key}>
+              <span>{row.key[0].toUpperCase() + row.key.slice(1)}</span>
+              <strong>{row.score === null ? "—" : row.score.toFixed(1)}</strong>
+              <em
+                className={
+                  row.delta === null || row.delta === 0
+                    ? "flat"
+                    : row.delta > 0
+                      ? "positive"
+                      : "negative"
+                }
+              >
+                {row.delta === null || row.delta === 0
+                  ? "—"
+                  : `${row.delta > 0 ? "↑ +" : "↓ "}${Math.abs(row.delta).toFixed(1)}`}
+              </em>
+            </div>
+          ))}
+        </div>
+        <p className="skill-insight">{skillUpdate.insight}</p>
+      </section>
+
+      <IELTSIndexChart
+        points={p.dailyProgress}
+        sessions={p.allSessions}
+        today={p.plan.date}
+      />
+    </section>
+  );
+}
+
+type ChartRange = "day" | "week" | "month";
+type IndexCandle = ReturnType<typeof toDailyProgressCandles>[number] & {
+  studySeconds: number;
+};
+
+function candleGroupKey(date: string, range: ChartRange) {
+  if (range === "day") return date;
+  if (range === "month") return date.slice(0, 7);
+  const weekStart = new Date(`${date}T12:00:00`);
+  weekStart.setDate(weekStart.getDate() - ((weekStart.getDay() + 6) % 7));
+  return weekStart.toISOString().slice(0, 10);
+}
+
+function groupIndexCandles(
+  points: DailyProgressPoint[],
+  sessions: StudySession[],
+  range: ChartRange,
+) {
+  const candles = toDailyProgressCandles(points);
+  const groups = new Map<string, IndexCandle[]>();
+  candles.forEach((candle) => {
+    const key = candleGroupKey(candle.date, range);
+    groups.set(key, [...(groups.get(key) ?? []), { ...candle, studySeconds: 0 }]);
+  });
+  return [...groups.entries()]
+    .map(([key, items]) => {
+      const first = items[0], last = items.at(-1)!;
+      const dates = new Set(items.map((item) => item.date));
+      return {
+        ...last,
+        date: range === "day" ? last.date : key,
+        open: first.open,
+        high: Math.max(...items.map((item) => item.high)),
+        low: Math.min(...items.map((item) => item.low)),
+        close: last.close,
+        delta: last.close - first.open,
+        studySeconds: sessions
+          .filter((session) => dates.has(session.date))
+          .reduce((sum, session) => sum + session.duration, 0),
+      };
+    })
+    .slice(range === "day" ? -20 : -12);
+}
+
+function IELTSIndexChart(p: {
+  points: DailyProgressPoint[];
+  sessions: StudySession[];
+  today: string;
+}) {
+  const [range, setRange] = useState<ChartRange>("day");
+  const [hover, setHover] = useState<IndexCandle | null>(null);
+  const candles = groupIndexCandles(p.points, p.sessions, range);
+  const last = candles.at(-1);
+  const format = (value: number) => Number(value.toFixed(1));
+  if (!last) {
+    return (
+      <section className="index-chart index-chart-empty">
+        <div className="dashboard-heading">
+          <p className="eyebrow">IELTS INDEX</p>
+          <span>TODAY · IN PROGRESS</span>
+        </div>
+        <strong>—</strong>
+        <p>Awaiting enough learning data for the first daily settlement.</p>
+      </section>
+    );
+  }
+  const changePercent = last.open ? (last.delta / last.open) * 100 : 0;
+  const width = 760, height = 270, left = 42, right = 14, top = 16, bottom = 34;
+  const plotWidth = width - left - right, plotHeight = height - top - bottom;
+  const low = Math.max(0, Math.min(...candles.map((candle) => candle.low)) - 2);
+  const high = Math.min(100, Math.max(...candles.map((candle) => candle.high)) + 2);
+  const domain = Math.max(4, high - low);
+  const y = (value: number) => top + ((high - value) / domain) * plotHeight;
+  const x = (index: number) => left + ((index + 0.5) * plotWidth) / candles.length;
+  const body = Math.max(12, Math.min(26, (plotWidth / candles.length) * 0.5));
+  return (
+    <section className="index-chart">
+      <div className="index-chart-head">
+        <div>
+          <p className="eyebrow">IELTS INDEX</p>
+          <h2>{format(last.close)}</h2>
+          <b className={last.delta < 0 ? "negative" : last.delta > 0 ? "positive" : "flat"}>
+            {last.delta >= 0 ? "+" : ""}{format(last.delta)} · {last.delta >= 0 ? "+" : ""}{format(changePercent)}%
+          </b>
+        </div>
+        <span>{last.date === p.today && last.settledAt ? "TODAY · SETTLED" : "TODAY · IN PROGRESS"}</span>
+      </div>
+      <div className="index-candle-frame">
+        <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="IELTS 综合指数 K 线图">
+          {[high, (high + low) / 2, low].map((value) => (
+            <g key={value}>
+              <line x1={left} x2={width - right} y1={y(value)} y2={y(value)} className="index-grid" />
+              <text x="3" y={y(value) + 3} className="index-axis">{format(value)}</text>
+            </g>
+          ))}
+          {candles.map((candle, index) => {
+            const direction = candle.close > candle.open ? "up" : candle.close < candle.open ? "down" : "flat";
+            const topBody = Math.min(y(candle.open), y(candle.close));
+            const bodyHeight = direction === "flat" ? 3 : Math.max(8, Math.abs(y(candle.open) - y(candle.close)));
+            return (
+              <g key={candle.date} className="index-candle" tabIndex={0} onMouseEnter={() => setHover(candle)} onFocus={() => setHover(candle)}>
+                <line x1={x(index)} x2={x(index)} y1={y(candle.high)} y2={y(candle.low)} className={`index-wick ${direction}`} />
+                <rect x={x(index) - body / 2} y={direction === "flat" ? y(candle.close) - 1.5 : topBody} width={body} height={bodyHeight} rx="1" className={`index-body ${direction}`} />
+                <text x={x(index)} y={height - 9} textAnchor="middle" className="index-date">{candle.date.slice(5).replace("-", "/")}</text>
+              </g>
+            );
+          })}
+        </svg>
+        {hover && (
+          <aside className="index-tooltip">
+            <b>{hover.date}</b>
+            <div><span>Open</span><strong>{format(hover.open)}</strong><span>High</span><strong>{format(hover.high)}</strong></div>
+            <div><span>Low</span><strong>{format(hover.low)}</strong><span>Close</span><strong>{format(hover.close)}</strong></div>
+            <em className={hover.delta < 0 ? "negative" : hover.delta > 0 ? "positive" : "flat"}>{hover.delta >= 0 ? "+" : ""}{format(hover.delta)} · {format(hover.open ? (hover.delta / hover.open) * 100 : 0)}%</em>
+            <small>Study Time · {formatMinutes(hover.studySeconds)}</small>
+          </aside>
+        )}
+      </div>
+      <div className="index-chart-footer">
+        <div className="index-tabs">
+          {(["day", "week", "month"] as ChartRange[]).map((item) => (
+            <button key={item} className={range === item ? "active" : ""} onClick={() => { setRange(item); setHover(null); }}>
+              {item === "day" ? "日" : item === "week" ? "周" : "月"}
+            </button>
+          ))}
+        </div>
+        <small>{last.date === p.today && last.settledAt ? "20:00 已完成今日结算" : "20:00 自动结算每日指数"}</small>
+      </div>
+    </section>
+  );
+}
+
+function LegacyQuietOverview(p: {
   mastery: ReturnType<typeof calculateProgress>;
   userProgress: UserProgress;
   setUserProgress: (x: UserProgress) => void;
