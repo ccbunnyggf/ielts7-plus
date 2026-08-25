@@ -44,14 +44,25 @@ import {
 import {
   buildListeningPerformance,
   classifyListeningError,
-  evaluateListeningAnswer,
+  evaluateListeningResponse,
   generateListeningPlan,
   listeningErrorLabel,
+  type ListeningAnswerMode,
+  type ListeningWordResult,
   type GeneratedListeningItem,
   type ListeningErrorType,
   type ListeningPerformance,
+  type ListeningSource,
   type ThemeContextInput,
 } from "./listeningService";
+import {
+  advanceCurriculumProgress,
+  curriculumCurrentSection,
+  curriculumLocation,
+  parseCurriculumUpload,
+  type CurriculumBook,
+  type CurriculumProgress,
+} from "./curriculumService";
 
 type Category =
   | "listening"
@@ -255,12 +266,15 @@ type ListeningSession = {
     correct: boolean;
     replays: number;
     mistakeType: ListeningErrorType | "";
+    source: ListeningSource;
+    wordResult?: ListeningWordResult;
   }[];
   startedAt: string;
   status: "active" | "paused" | "complete";
   currentAnswer: string;
   currentReplays: number;
   checked?: boolean;
+  currentWordResult?: ListeningWordResult;
   duration?: number;
 };
 type ProgressSnapshot = {
@@ -463,6 +477,8 @@ export default function Home() {
     [listeningSession, setListeningSession] = useState<ListeningSession | null>(
       null,
     ),
+    [curriculumBook, setCurriculumBook] = useState<CurriculumBook | null>(null),
+    [curriculumProgress, setCurriculumProgress] = useState<CurriculumProgress | null>(null),
     [snapshots, setSnapshots] = useState<ProgressSnapshot[]>([]),
     [userProgress, setUserProgress] = useState<UserProgress>({
       currentLevel: "B1",
@@ -503,6 +519,8 @@ export default function Home() {
     setArgumentsCards(load("ielts-argument-cards", []));
     setListeningReviews(load("ielts-listening-reviews", []));
     setListeningSession(load("ielts-listening-session", null));
+    setCurriculumBook(load("ielts-listening-curriculum", null));
+    setCurriculumProgress(load("ielts-listening-curriculum-progress", null));
     setSnapshots(load("ielts-progress-snapshots", []));
     setUserProgress(
       load("ielts-user-progress", { currentLevel: "B1", target: "7.0" }),
@@ -538,6 +556,11 @@ export default function Home() {
       "ielts-listening-session",
       JSON.stringify(listeningSession),
     );
+    localStorage.setItem("ielts-listening-curriculum", JSON.stringify(curriculumBook));
+    localStorage.setItem(
+      "ielts-listening-curriculum-progress",
+      JSON.stringify(curriculumProgress),
+    );
     localStorage.setItem("ielts-progress-snapshots", JSON.stringify(snapshots));
     localStorage.setItem("ielts-user-progress", JSON.stringify(userProgress));
     localStorage.setItem("ielts-review-items", JSON.stringify(reviewItems));
@@ -560,6 +583,8 @@ export default function Home() {
     argumentsCards,
     listeningReviews,
     listeningSession,
+    curriculumBook,
+    curriculumProgress,
     snapshots,
     userProgress,
     reviewItems,
@@ -1057,6 +1082,10 @@ export default function Home() {
             setPersistedSession={setListeningSession}
             date={today}
             theme={theme}
+            curriculumBook={curriculumBook}
+            setCurriculumBook={setCurriculumBook}
+            curriculumProgress={curriculumProgress}
+            setCurriculumProgress={setCurriculumProgress}
           />
         )}
         {route === "writing" && (
@@ -4635,6 +4664,10 @@ function Listening(p: {
   setPersistedSession: (x: ListeningSession | null) => void;
   date: string;
   theme: DailyTheme;
+  curriculumBook: CurriculumBook | null;
+  setCurriculumBook: (x: CurriculumBook | null) => void;
+  curriculumProgress: CurriculumProgress | null;
+  setCurriculumProgress: (x: CurriculumProgress | null) => void;
 }) {
   const compatibleSession = (candidate: ListeningSession | null) =>
     candidate?.queue.every((item) => "source" in item) ? candidate : null;
@@ -4643,6 +4676,12 @@ function Listening(p: {
   const [session, setSession] = useState<ListeningSession | null>(() => compatibleSession(p.persistedSession));
   const [answer, setAnswer] = useState("");
   const [checked, setChecked] = useState<boolean | null>(null);
+  const [answerMode, setAnswerMode] = useState<ListeningAnswerMode>("english_text");
+  const [recordingMeaning, setRecordingMeaning] = useState(false);
+  const [voiceMessage, setVoiceMessage] = useState("");
+  const [voiceController, setVoiceController] = useState<SpeechController | null>(null);
+  const [analysingCurriculum, setAnalysingCurriculum] = useState(false);
+  const [curriculumMessage, setCurriculumMessage] = useState("");
   useEffect(() => {
     const refresh = () => setVoices(window.speechSynthesis.getVoices());
     refresh();
@@ -4663,7 +4702,9 @@ function Listening(p: {
     setChecked(restored.checked ?? null);
   }, [p.persistedSession, session?.id]);
   const plan = useMemo(
-    () => generateListeningPlan({
+    () => {
+      const currentCurriculum = curriculumCurrentSection(p.curriculumBook, p.curriculumProgress);
+      return generateListeningPlan({
       dateKey: p.date || "listening-initial",
       theme: themeContext,
       fallbackTheme: p.theme,
@@ -4671,10 +4712,32 @@ function Listening(p: {
       reviews: p.reviews,
       highlights: p.highlights,
       materials: p.materials,
-    }),
-    [p.date, p.theme, p.words, p.reviews, p.highlights, p.materials, themeContext],
+      curriculum: currentCurriculum && p.curriculumBook ? {
+        bookId: p.curriculumBook.id,
+        bookTitle: p.curriculumBook.title,
+        unitId: currentCurriculum.unit.id,
+        unitLabel: currentCurriculum.unit.unitNumber ? `U${currentCurriculum.unit.unitNumber}` : currentCurriculum.unit.title,
+        sectionId: currentCurriculum.section.id,
+        pageStart: currentCurriculum.section.startPage,
+        pageEnd: currentCurriculum.section.endPage,
+        exerciseType: currentCurriculum.section.exerciseType,
+        prompts: currentCurriculum.section.prompts,
+        vocabulary: currentCurriculum.section.vocabulary,
+      } : null,
+    });
+    },
+    [p.date, p.theme, p.words, p.reviews, p.highlights, p.materials, themeContext, p.curriculumBook, p.curriculumProgress],
   );
   const current = session?.queue[session.index];
+  const curriculumHere = curriculumCurrentSection(p.curriculumBook, p.curriculumProgress);
+  const curriculumText = curriculumLocation(p.curriculumBook, p.curriculumProgress);
+  const currentSource = current?.source === "curriculum"
+    ? { title: curriculumText, detail: current.exerciseType || "Curriculum training" }
+    : current?.source === "listening_vocabulary"
+      ? { title: "LISTENING VOCABULARY", detail: "Sound → Meaning" }
+      : current?.source === "review"
+        ? { title: "REVIEW · Previous Listening Errors", detail: "Historical listening weakness" }
+        : { title: "READING CONTEXT", detail: current?.theme || "IELTS listening practice" };
   const updateSession = (next: ListeningSession) => {
     setSession(next);
     p.setPersistedSession(next);
@@ -4709,12 +4772,17 @@ function Listening(p: {
     p.start(p.task);
     setAnswer("");
     setChecked(null);
+    setAnswerMode("english_text");
+    setVoiceMessage("");
   };
   const check = () => {
     if (!current || !session || !running) return;
-    const result = evaluateListeningAnswer(current, answer);
-    setChecked(result);
-    updateSession({ ...session, currentAnswer: answer, checked: result });
+    const evaluation = evaluateListeningResponse(current, answer, answerMode);
+    const wordResult = evaluation.wordResult
+      ? { ...evaluation.wordResult, replayCount: session.currentReplays }
+      : undefined;
+    setChecked(evaluation.correct);
+    updateSession({ ...session, currentAnswer: answer, checked: evaluation.correct, currentWordResult: wordResult });
   };
   const nextItem = () => {
     if (!current || checked === null || !session) return;
@@ -4758,11 +4826,14 @@ function Listening(p: {
           correct: checked,
           replays: session.currentReplays,
           mistakeType,
+          source: current.source,
+          wordResult: session.currentWordResult,
         },
       ],
       currentAnswer: "",
       currentReplays: 0,
       checked: undefined,
+      currentWordResult: undefined,
     };
     if (nextSession.status === "complete") {
       const completed = { ...nextSession, duration: p.seconds };
@@ -4778,11 +4849,27 @@ function Listening(p: {
         ...stored.filter((item) => item.sessionId !== completed.id),
         performance,
       ]));
+      const curriculumAnswers = completed.answers.filter((answer) => answer.source === "curriculum");
+      if (curriculumAnswers.length && p.curriculumBook && curriculumHere) {
+        const curriculumAccuracy = curriculumAnswers.filter((answer) => answer.correct).length / curriculumAnswers.length;
+        const averageReplays = curriculumAnswers.reduce((total, answer) => total + answer.replays, 0) / curriculumAnswers.length;
+        if (curriculumAccuracy >= 0.6 && averageReplays < 3) {
+          p.setCurriculumProgress(advanceCurriculumProgress(p.curriculumBook, p.curriculumProgress, completed.date));
+          setCurriculumMessage("教材本节已完成，下一次将进入下一练习。");
+        } else {
+          p.setCurriculumProgress({
+            ...(p.curriculumProgress || { bookId: p.curriculumBook.id, completedPages: [] }),
+            lastStudiedAt: completed.date,
+          });
+          setCurriculumMessage("本节会保留到下一次，先把听辨稳定下来。");
+        }
+      }
       updateSession(completed);
       p.finish();
     } else updateSession(nextSession);
     setAnswer("");
     setChecked(null);
+    setAnswerMode("english_text");
   };
   const pauseOrResume = () => {
     if (!session) return;
@@ -4795,6 +4882,53 @@ function Listening(p: {
     }
   };
   const counts = (type: ListeningType) => plan.items.filter((item) => item.trainingType === type).length;
+  const startMeaningVoice = () => {
+    if (recordingMeaning) {
+      voiceController?.stop();
+      setRecordingMeaning(false);
+      return;
+    }
+    setAnswerMode("chinese_voice");
+    const controller = startBrowserTranscription((text) => {
+      setAnswer(text);
+      setRecordingMeaning(false);
+      setVoiceMessage(`你说：${text}`);
+      if (session) updateSession({ ...session, currentAnswer: text });
+    }, (message) => {
+      setRecordingMeaning(false);
+      setVoiceMessage("当前浏览器无法识别中文语音，可直接输入中文意思。");
+      if (message) setVoiceMessage("当前浏览器无法识别中文语音，可直接输入中文意思。");
+    }, "zh-CN");
+    if (controller) {
+      setVoiceController(controller);
+      setRecordingMeaning(true);
+      setVoiceMessage("正在聆听中文意思…");
+    }
+  };
+  const uploadCurriculum = async (file: File | undefined) => {
+    if (!file || analysingCurriculum) return;
+    setAnalysingCurriculum(true);
+    setCurriculumMessage("Analysing curriculum...");
+    try {
+      const book = await parseCurriculumUpload(file);
+      const initial = curriculumCurrentSection(book, null);
+      p.setCurriculumBook(book);
+      p.setCurriculumProgress({
+        bookId: book.id,
+        currentUnitId: initial?.unit.id,
+        currentSectionId: initial?.section.id,
+        currentPage: initial?.section.startPage,
+        completedPages: [],
+      });
+      setCurriculumMessage("Curriculum ready.");
+    } catch {
+      setCurriculumMessage("Could not fully analyse this curriculum. Retry upload.");
+      p.setCurriculumBook(null);
+      p.setCurriculumProgress(null);
+    } finally {
+      setAnalysingCurriculum(false);
+    }
+  };
   const done = session?.answers.length || 0;
   return (
     <section className="listening">
@@ -4821,19 +4955,42 @@ function Listening(p: {
               <article><b>Sentence Dictation</b><small>{counts("sentence")} items</small></article>
               <article><b>Mini Listening</b><small>{counts("mini")} item</small></article>
             </div>
-            <button className="primary" onClick={begin}>START TRAINING</button>
+            <div className="listen-curriculum">
+              <div>
+                <p className="eyebrow">CURRICULUM</p>
+                <strong>{p.curriculumBook ? curriculumText : "No listening curriculum uploaded."}</strong>
+                <small>{analysingCurriculum ? "Analysing curriculum..." : curriculumMessage || p.curriculumBook?.parserNote || "上传教材后，系统只会使用实际可解析到的课程位置。"}</small>
+              </div>
+              <label className="outline curriculum-upload">
+                {p.curriculumBook ? "Upload / Replace" : "Upload"}
+                <input type="file" accept="application/pdf,text/plain,.pdf,.txt" onChange={(event) => { void uploadCurriculum(event.target.files?.[0]); event.currentTarget.value = ""; }} />
+              </label>
+            </div>
+            {plan.items.length ? (
+              <button className="primary" onClick={begin}>START TRAINING</button>
+            ) : (
+              <p className="analysis-message">先上传可解析教材，或在单词、复习、阅读中积累可用于听力的真实内容。</p>
+            )}
           </section>
           {session?.status === "complete" && <SessionSummary session={session} />}
         </>
       ) : current ? (
         <>
-          <div className="listen-session-bar"><span>Today's Listening</span><b>{done + 1} / {session.queue.length}</b><span>{running ? "Training" : "Paused"}</span></div>
+          <div className="listen-session-bar"><span><b>{currentSource.title}</b><small>{currentSource.detail}</small></span><b>{done + 1} / {session.queue.length}</b><span>{running ? "Training" : "Paused"}</span></div>
           <article className="listen-stage">
             <div className="listen-stage-top"><span>{current.trainingType === "word" ? "WORD RECOGNITION" : current.trainingType === "chunk" ? "CHUNK RECOGNITION" : current.trainingType === "sentence" ? "SENTENCE DICTATION" : "MINI LISTENING"}</span><span>Replay ×{session.currentReplays}</span></div>
             <h3>{current.trainingType === "word" ? "What did you hear?" : current.trainingType === "chunk" ? "Type the phrase you hear." : current.trainingType === "sentence" ? "Write the sentence you hear." : "Listen, then type the key idea."}</h3>
             <p>{current.trainingType === "mini" ? "Transcript stays hidden until you check your answer." : "Use replay when you genuinely need it."}</p>
             <div className="listen-controls"><button className="listen-play" onClick={() => speak(false)} disabled={!running}>● Play audio</button><button onClick={() => speak(true)} disabled={!running}>Replay</button></div>
-            <input className="listen-answer" value={answer} onChange={(event) => { const value = event.target.value; setAnswer(value); updateSession({ ...session, currentAnswer: value }); }} placeholder="Type what you heard…" disabled={checked !== null || !running} />
+            {current.trainingType === "word" && (
+              <div className="word-answer-mode">
+                <button className={answerMode === "english_text" ? "active" : ""} onClick={() => { setAnswerMode("english_text"); setVoiceMessage(""); }} disabled={!running}>英文拼写</button>
+                <button className={answerMode === "chinese_text" ? "active" : ""} onClick={() => { setAnswerMode("chinese_text"); setVoiceMessage(""); }} disabled={!running}>中文意思</button>
+                <button onClick={startMeaningVoice} disabled={!running}>🎙 {recordingMeaning ? "Listening..." : "说中文意思"}</button>
+              </div>
+            )}
+            <input className="listen-answer" value={answer} onChange={(event) => { const value = event.target.value; setAnswer(value); updateSession({ ...session, currentAnswer: value }); }} placeholder={current.trainingType === "word" && answerMode !== "english_text" ? "输入中文意思…" : "Type what you heard…"} disabled={checked !== null || !running} />
+            {voiceMessage && current.trainingType === "word" && <p className="listen-voice-message">{voiceMessage}</p>}
             {checked === null ? (
               <div className="listen-check"><small>{answer.trim() ? answer.trim().split(/\s+/).length : 0} words</small><button className="primary" onClick={check} disabled={!answer.trim() || !running}>CHECK</button></div>
             ) : (
@@ -4841,6 +4998,7 @@ function Listening(p: {
                 <p className={checked ? "correct" : "wrong"}>{checked ? "Correct." : "Not quite."}</p>
                 <p>Your answer<br /><strong>{answer || "—"}</strong></p>
                 <p>Correct answer<br /><strong>{current.text}</strong></p>
+                {current.trainingType === "word" && session.currentWordResult && <p>Meaning recognised {session.currentWordResult.meaningUnderstood ? "✓" : "—"}{session.currentWordResult.spellingCorrect !== undefined ? ` · Spelling ${session.currentWordResult.spellingCorrect ? "✓" : "—"}` : ""}</p>}
                 {current.meaning && <p>Meaning · {current.meaning}</p>}
                 {!checked && <p className="listen-diagnosis">自动诊断：{listeningErrorLabel[classifyListeningError({ item: current, answer, replays: session.currentReplays, knownWords: p.words.map((word) => word.word) })]}</p>}
                 <button className="primary listen-next" onClick={nextItem}>{done + 1 === session.queue.length ? "FINISH SESSION" : "NEXT"}</button>
