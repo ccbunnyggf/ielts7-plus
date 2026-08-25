@@ -1,5 +1,5 @@
 export type SupervisorState = 'LOW_START'|'RECOVERING'|'STRONG_DAY'|'NEAR_COMPLETE'|'OVERLOAD'|'DECLINE';
-export type SupervisorInput = {todayProgress:number; dailyTheme:string; studyTime:number; weakestSkill?:string; reviewDue:number; recentTrend:'up'|'flat'|'down'; dailyDelta:number; completedModules:number; skippedModules:number};
+export type SupervisorInput = {dateKey:string; todayProgress:number; dailyTheme:string; studyTime:number; weakestSkill?:string; reviewDue:number; recentTrend:'up'|'flat'|'down'; dailyDelta:number; completedModules:number; skippedModules:number; nextModule?:string};
 export type SupervisorMessage = {id:string; state:SupervisorState; headline:string; message:string; nextAction:string};
 
 const copy:Record<SupervisorState, [string, string][]> = {
@@ -62,12 +62,24 @@ export function getSupervisorState(input:SupervisorInput):SupervisorState {
   return 'LOW_START';
 }
 
-export function generateSupervisorMessage(input:SupervisorInput, recentIds:string[] = [], lockedId?:string):SupervisorMessage {
+export function stableHash(input:string):number {
+  let hash = 0;
+  for (let index = 0; index < input.length; index += 1) {
+    hash = (hash * 31 + input.charCodeAt(index)) >>> 0;
+  }
+  return hash;
+}
+
+export function pickDailyMessage<T>(messages:T[], dateKey:string, stateKey:string):T | undefined {
+  if (!messages.length) return undefined;
+  return messages[stableHash(`${dateKey}:${stateKey}`) % messages.length];
+}
+
+export function generateSupervisorMessage(input:SupervisorInput):SupervisorMessage {
   const state = getSupervisorState(input), options = copy[state];
-  const available = options.map((_, index) => index).filter((index) => !recentIds.includes(`${state}-${index}`));
-  const seed = `${input.dailyTheme}:${input.completedModules}:${Math.floor(input.studyTime / 60)}:${input.weakestSkill ?? ''}`.split('').reduce((sum, char) => sum + char.charCodeAt(0), 0);
-  const lockedIndex = lockedId?.startsWith(`${state}-`) ? Number(lockedId.split('-').at(-1)) : NaN;
-  const index = Number.isInteger(lockedIndex) && options[lockedIndex] ? lockedIndex : (available[seed % Math.max(available.length, 1)] ?? seed % options.length);
-  const [headline, message] = options[index];
+  const stateKey = `${state}:${input.nextModule ?? ""}`;
+  const selected = pickDailyMessage(options, input.dateKey, stateKey) ?? options[0];
+  const index = options.indexOf(selected);
+  const [headline, message] = selected;
   return {id:`${state}-${index}`, state, headline, message, nextAction:''};
 }

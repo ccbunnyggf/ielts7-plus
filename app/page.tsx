@@ -1777,15 +1777,11 @@ function QuietOverview(p: {
       vocabulary: "单词",
     } as const;
   const todaySeconds = p.allSessions
-    .filter((x) => x.date === localDate())
+    .filter((x) => x.date === p.plan.date)
     .reduce((sum, x) => sum + x.duration, 0);
-  const [recentMessages, setRecentMessages] = useState<string[]>(() =>
-    load("ielts-supervisor-messages", []),
-  );
-  const messageKey = "ielts-supervisor-message-" + localDate(),
-    [lockedMessage, setLockedMessage] = useState(() => load(messageKey, ""));
   const supervisor = generateSupervisorMessage(
     {
+      dateKey: p.plan.date,
       todayProgress: Math.round(
         (completed /
           Math.max(
@@ -1804,25 +1800,18 @@ function QuietOverview(p: {
       skippedModules: p.plan.tasks.filter(
         (x) => !x.completed && x.category !== "optional",
       ).length,
+      nextModule: next?.category,
     },
-    recentMessages,
-    lockedMessage,
   );
   useEffect(() => {
-    if (lockedMessage === supervisor.id) return;
-    setLockedMessage(supervisor.id);
-    localStorage.setItem(messageKey, JSON.stringify(supervisor.id));
-    const nextHistory = [
-      supervisor.id,
-      ...recentMessages.filter((x) => x !== supervisor.id),
-    ].slice(0, 5);
-    setRecentMessages(nextHistory);
+    const recentMessages = load<string[]>("ielts-supervisor-messages", []);
+    const nextHistory = [supervisor.id, ...recentMessages.filter((x) => x !== supervisor.id)].slice(0, 5);
     localStorage.setItem(
       "ielts-supervisor-messages",
       JSON.stringify(nextHistory),
     );
-  }, [lockedMessage, messageKey, recentMessages, supervisor.id]);
-  const monday = new Date();
+  }, [supervisor.id]);
+  const monday = new Date(`${p.plan.date}T12:00:00`);
   monday.setHours(0, 0, 0, 0);
   monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7));
   const week = p.allSessions.filter((x) => new Date(x.date) >= monday),
