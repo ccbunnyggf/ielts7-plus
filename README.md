@@ -28,6 +28,12 @@ pnpm install
 pnpm dev
 ```
 
+### Windows 快捷启动
+
+双击项目根目录的 `启动本地网站.bat`，然后在浏览器打开
+`http://localhost:3000`。本地网址会继续使用这台电脑此前保存的
+学习时间、任务与 K 线记录。
+
 ## Build
 
 ```bash
