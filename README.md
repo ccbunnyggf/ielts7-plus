@@ -24,17 +24,27 @@ IELTS7+ has no user registration or login. Learning data stays in the browser's 
 ## Installation
 
 ```bash
-npm install
-npm run dev
+pnpm install
+pnpm dev
 ```
 
 ## Build
 
 ```bash
-npm run build
+pnpm build
 ```
 
-## Deploy to Cloudflare Workers
+## Deployment
+
+The public site is deployed with GitHub Pages:
+
+https://ccbunnyggf.github.io/ielts7-plus/
+
+Every push to `main` runs the GitHub Pages workflow automatically. See
+[deployment skills and runbook](docs/deployment-skills.md) for the exact
+tools, configuration, validation steps, and troubleshooting notes.
+
+## Optional Cloudflare Workers deployment
 
 This project uses the Cloudflare Vite plugin and deploys as a Cloudflare Worker
 with static assets. After logging in to Cloudflare with Wrangler, run:
