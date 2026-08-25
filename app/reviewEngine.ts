@@ -1,13 +1,13 @@
-import {createEmptyCard,fsrs,generatorParameters,Rating} from 'ts-fsrs';
+import {createEmptyCard,fsrs,generatorParameters,Rating,type CardInput,type Grade} from 'ts-fsrs';
 
 export type ReviewRating='again'|'hard'|'good'|'easy';
-export type ReviewItem={id:string;parentEntityId:string;sourceModule:'reading'|'listening'|'speaking'|'writing'|'vocabulary';sourceId:string;skill:'recognition'|'recall'|'listening'|'speaking'|'writing'|'logic'|'production'|'transfer';reviewType:string;prompt:string;answer:string;context:string;difficultyLevel:number;masteryStage:number;fsrsCard:ReturnType<typeof createEmptyCard>;createdAt:string;lastReviewedAt?:string;nextReviewAt:string;reviewCount:number;lapseCount:number;priority:number;isSuspended:boolean;buriedUntil?:string};
+export type ReviewItem={id:string;parentEntityId:string;sourceModule:'reading'|'listening'|'speaking'|'writing'|'vocabulary';sourceId:string;skill:'recognition'|'recall'|'listening'|'speaking'|'writing'|'logic'|'production'|'transfer';reviewType:string;prompt:string;answer:string;context:string;difficultyLevel:number;masteryStage:number;fsrsCard:CardInput;createdAt:string;lastReviewedAt?:string;nextReviewAt:string;reviewCount:number;lapseCount:number;priority:number;isSuspended:boolean;buriedUntil?:string};
 export type ReviewLog={id:string;reviewItemId:string;timestamp:string;rating:ReviewRating;correct:boolean;userAnswer:string;responseTimeMs:number;mistakeType:string;previousStage:number;nextStage:number;fsrsLog:unknown};
 const scheduler=fsrs(generatorParameters({request_retention:.9,enable_fuzz:false,learning_steps:['10m','30m'],relearning_steps:['20m']}));
 const iso=(d:Date|string)=>new Date(d).toISOString();
 export const newReviewItem=(input:Omit<ReviewItem,'fsrsCard'|'createdAt'|'nextReviewAt'|'reviewCount'|'lapseCount'|'priority'|'isSuspended'>):ReviewItem=>{const now=new Date(),card=createEmptyCard(now);return {...input,fsrsCard:card,createdAt:now.toISOString(),nextReviewAt:iso(card.due),reviewCount:0,lapseCount:0,priority:0,isSuspended:false}};
 export function scheduleReview(item:ReviewItem,rating:ReviewRating,answer:string,responseTimeMs:number,mistakeType:string){
- const correct=rating!=='again',grade={again:Rating.Again,hard:Rating.Hard,good:Rating.Good,easy:Rating.Easy}[rating],result=scheduler.next(item.fsrsCard,new Date(),grade);
+ const correct=rating!=='again',grade={again:Rating.Again,hard:Rating.Hard,good:Rating.Good,easy:Rating.Easy}[rating] as Grade,result=scheduler.next(item.fsrsCard,new Date(),grade);
  const successful=correct?item.reviewCount+1:0;let stage=item.masteryStage;
  if(rating==='again')stage=Math.max(1,stage-1);else if(successful>=3&&rating!=='hard')stage=Math.min(5,stage+1);
  const updated:{[K in keyof ReviewItem]:ReviewItem[K]}={...item,fsrsCard:result.card,nextReviewAt:iso(result.card.due),lastReviewedAt:new Date().toISOString(),reviewCount:item.reviewCount+1,lapseCount:item.lapseCount+(correct?0:1),masteryStage:stage,priority:correct?0:2,buriedUntil:undefined};

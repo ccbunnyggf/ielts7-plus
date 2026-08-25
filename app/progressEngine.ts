@@ -2,17 +2,17 @@ export type MasteryComponent={label:string;score:number;weight:number;detail:str
 export type SkillMastery={score:number|null;components:MasteryComponent[];reason?:string};
 export type ProgressInput={
  articles:{status:string;completedAt?:string}[];highlights:{type:string;createdAt:string}[];cards:{difficulty:string;reviewCount:number;lastReviewedAt?:string}[];
- listeningReviews:{trainingType:string;correct:boolean;rating:string;reviewCount:number;lastReviewedAt:string}[];
+ listeningReviews:{trainingType:string;correct:boolean;rating:string;mistakeType?:string;reviewCount:number;lastReviewedAt:string}[];
  writingMaterials:{type:string;masteryLevel?:number;reviewCount?:number;lastReviewedAt?:string;createdAt?:string}[];
  argumentCards:{createdAt:string}[];words:{due:string}[];sessions:{category:string;date:string;duration:number}[];
 };
 const clamp=(n:number)=>Math.max(0,Math.min(100,Math.round(n)));
 const recent=(date?:string,days=30)=>!!date&&new Date(date).getTime()>=Date.now()-days*86400000;
 const weighted=(parts:MasteryComponent[])=>clamp(parts.reduce((sum,x)=>sum+x.score*x.weight,0));
-const reviewedScore=(cards:{difficulty:string;reviewCount:number;lastReviewedAt?:string}[])=>{
+const reviewedScore=(cards:{difficulty?:string;rating?:string;reviewCount:number;lastReviewedAt?:string}[])=>{
  if(!cards.length)return 0;
  const quality={again:15,hard:45,good:75,easy:95} as Record<string,number>;
- return cards.reduce((sum,x)=>sum+(quality[x.difficulty]??35)*Math.min(1,x.reviewCount/2),0)/cards.length;
+ return cards.reduce((sum,x)=>sum+(quality[x.difficulty??x.rating??'']??35)*Math.min(1,x.reviewCount/2),0)/cards.length;
 };
 
 export function calculateReadingMastery(input:ProgressInput):SkillMastery{
