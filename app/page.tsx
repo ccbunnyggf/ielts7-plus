@@ -41,6 +41,17 @@ import {
   buildThemeContext,
   ReadingPerformance,
 } from "./readingAnalysis";
+import {
+  buildListeningPerformance,
+  classifyListeningError,
+  evaluateListeningAnswer,
+  generateListeningPlan,
+  listeningErrorLabel,
+  type GeneratedListeningItem,
+  type ListeningErrorType,
+  type ListeningPerformance,
+  type ThemeContextInput,
+} from "./listeningService";
 
 type Category =
   | "listening"
@@ -213,16 +224,8 @@ type ArgumentCard = {
   relatedPhrases: string;
   createdAt: string;
 };
-type ListeningType = "word" | "chunk" | "sentence" | "mini";
-type ListeningItem = {
-  id: string;
-  sourceId: string;
-  sourceType: string;
-  trainingType: ListeningType;
-  text: string;
-  meaning?: string;
-  context?: string;
-};
+type ListeningType = GeneratedListeningItem["trainingType"];
+type ListeningItem = GeneratedListeningItem;
 type ListeningReview = {
   id: string;
   sourceType: string;
@@ -233,33 +236,32 @@ type ListeningReview = {
   userAnswer: string;
   correct: boolean;
   rating: "again" | "hard" | "good" | "easy";
-  mistakeType: string;
+  mistakeType: ListeningErrorType | "";
   lastReviewedAt: string;
   nextReviewAt: string;
   reviewCount: number;
   replays: number;
 };
-type ListeningSettings = {
-  accent: "British English" | "American English";
-  voice: string;
-  speed: number;
-  wordCount: number;
-  chunkCount: number;
-  sentenceCount: number;
-  miniCount: number;
-};
 type ListeningSession = {
   id: string;
+  planId: string;
+  date: string;
+  theme: string;
   queue: ListeningItem[];
   index: number;
   answers: {
     itemId: string;
+    answer: string;
     correct: boolean;
     replays: number;
-    mistakeType: string;
+    mistakeType: ListeningErrorType | "";
   }[];
   startedAt: string;
-  status: "active" | "complete";
+  status: "active" | "paused" | "complete";
+  currentAnswer: string;
+  currentReplays: number;
+  checked?: boolean;
+  duration?: number;
 };
 type ProgressSnapshot = {
   id: string;
@@ -1053,6 +1055,8 @@ export default function Home() {
             setReviews={setListeningReviews}
             persistedSession={listeningSession}
             setPersistedSession={setListeningSession}
+            date={today}
+            theme={theme}
           />
         )}
         {route === "writing" && (
@@ -4614,7 +4618,7 @@ function ArticleSummary(p: {
 }
 
 const listeningCss =
-  ".listening{padding-top:34px;max-width:1120px;margin:auto}.listen-head{display:flex;justify-content:space-between;align-items:end;margin-bottom:24px}.listen-head h2{font-size:22px;margin:6px 0}.listen-plan{display:grid;grid-template-columns:repeat(4,1fr);gap:9px}.listen-plan article,.listen-stage,.listen-insights,.listen-summary{border:1px solid #e8e8e5;background:#fff;border-radius:9px;padding:16px}.listen-plan b{font-size:14px;display:block}.listen-plan small{font-size:10px;color:#888;display:block;margin-top:6px}.listen-layout{display:grid;grid-template-columns:minmax(0,1.45fr) 280px;gap:34px}.listen-stage{min-height:430px}.listen-stage-top{display:flex;justify-content:space-between;align-items:center}.listen-stage-top span{font-size:10px;border:1px solid #e8e8e5;border-radius:20px;padding:5px 8px;color:#777}.listen-stage h3{font-size:25px;margin:44px 0 8px}.listen-stage>p{font-size:13px;color:#777}.listen-controls{display:flex;gap:8px;align-items:center;margin:30px 0}.listen-controls button{border:1px solid #ccc;background:#fff;border-radius:6px;padding:9px 12px;font-size:11px}.listen-controls .listen-play{background:#181818;color:#fff;border-color:#181818}.listen-answer{width:100%;border:0;border-bottom:1px solid #ddd;outline:0;padding:13px 0;font:18px Georgia,serif}.listen-check{display:flex;justify-content:space-between;margin-top:15px}.listen-result{margin-top:23px;padding-top:17px;border-top:1px solid #e8e8e5}.listen-result p{font-size:12px;line-height:1.55}.listen-result strong{font:15px Georgia,serif}.listen-result .correct{color:#4e7152}.listen-result .wrong{color:#a04e46}.mistake-select{margin:10px 0;border:1px solid #e8e8e5;border-radius:5px;padding:7px;font-size:11px}.listen-ratings{display:flex;gap:6px;margin-top:14px}.listen-ratings button{border:1px solid #ddd;background:#fff;padding:7px 10px;border-radius:5px;font-size:10px}.listen-rail{border-left:1px solid #e8e8e5;padding-left:22px}.listen-rail h3{font-size:16px;margin:7px 0 12px}.listen-settings{display:grid;gap:10px}.listen-settings label{display:grid;gap:5px;font-size:10px;color:#777}.listen-settings select,.listen-settings input{border:1px solid #e8e8e5;background:#fff;border-radius:5px;padding:7px;font-size:11px}.listen-settings .count-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}.listen-insights{margin-top:16px}.listen-insights div{display:flex;justify-content:space-between;font-size:11px;padding:7px 0;border-bottom:1px solid #eee}.listen-insights div:last-child{border:0}.listen-summary{max-width:670px;margin:34px auto}.listen-summary h2{font-size:25px;margin:7px 0 20px}.listen-summary div{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.listen-summary span{font-size:11px;color:#777}.listen-summary b{display:block;color:#171717;font-size:18px;margin-top:3px}.listen-empty{background:#f2f2ef;border-radius:8px;padding:24px;font-size:12px;color:#666}.listen-session-bar{border:1px solid #e8e8e5;background:#f2f2ef;border-radius:8px;padding:11px 14px;margin:0 0 14px;display:flex;justify-content:space-between;font-size:11px}.listen-session-bar b{font-size:14px}@media(max-width:800px){.listen-layout{grid-template-columns:1fr}.listen-rail{border-left:0;border-top:1px solid #e8e8e5;padding:20px 0 0}.listen-plan{grid-template-columns:1fr 1fr}}";
+  ".listening{width:100%;max-width:920px;min-width:0;margin:0 auto;padding-top:24px;overflow-x:clip}.listen-head{display:flex;justify-content:space-between;align-items:end;gap:16px;border-bottom:1px solid #e8e8e5;padding-bottom:20px}.listen-head h2{font-size:25px;margin:6px 0}.listen-overview,.listen-stage,.listen-summary{border:1px solid #e8e8e5;background:#fff;border-radius:9px;padding:22px;min-width:0}.listen-overview{margin-top:22px}.listen-overview h3{font:24px Georgia,serif;margin:10px 0 6px}.listen-overview>p{margin:0;color:#777;font-size:12px}.listen-meta{display:flex;flex-wrap:wrap;gap:7px;margin:19px 0}.listen-meta span{border:1px solid #e8e8e5;border-radius:15px;padding:5px 8px;color:#666;font-size:10px}.listen-plan{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:0;border-top:1px solid #e8e8e5;border-bottom:1px solid #e8e8e5;margin:21px 0}.listen-plan article{padding:12px 13px;border-left:1px solid #e8e8e5;min-width:0}.listen-plan article:first-child{border-left:0;padding-left:0}.listen-plan b{font-size:11px;display:block;line-height:1.35}.listen-plan small{font-size:10px;color:#888;display:block;margin-top:6px}.listen-session-bar{display:flex;justify-content:space-between;align-items:center;gap:10px;margin:20px 0 13px;font-size:11px;color:#666}.listen-session-bar b{font-size:14px;color:#171717}.listen-stage{min-height:410px}.listen-stage-top{display:flex;justify-content:space-between;align-items:center;gap:10px}.listen-stage-top span{font-size:10px;border:1px solid #e8e8e5;border-radius:20px;padding:5px 8px;color:#777}.listen-stage h3{font-size:25px;margin:44px 0 8px}.listen-stage>p{font-size:13px;color:#777}.listen-controls{display:flex;gap:8px;align-items:center;margin:30px 0}.listen-controls button{border:1px solid #ccc;background:#fff;border-radius:6px;padding:9px 12px;font-size:11px}.listen-controls .listen-play{background:#181818;color:#fff;border-color:#181818}.listen-controls button:disabled,.listen-check button:disabled{opacity:.45;cursor:not-allowed}.listen-answer{width:100%;max-width:100%;box-sizing:border-box;border:0;border-bottom:1px solid #ddd;outline:0;padding:13px 0;font:18px Georgia,serif;background:transparent}.listen-check{display:flex;justify-content:space-between;margin-top:15px}.listen-result{margin-top:23px;padding-top:17px;border-top:1px solid #e8e8e5}.listen-result p{font-size:12px;line-height:1.55}.listen-result strong{font:15px Georgia,serif}.listen-result .correct{color:#4e7152}.listen-result .wrong{color:#a04e46}.listen-diagnosis{margin:12px 0 0;color:#777;font-size:11px}.listen-next{margin-top:14px}.listen-summary{margin:22px 0}.listen-summary h2{font-size:25px;margin:7px 0 20px}.listen-summary .summary-metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}.listen-summary span{font-size:11px;color:#777}.listen-summary b{display:block;color:#171717;font-size:18px;margin-top:3px}.error-breakdown{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0;margin-top:25px;border-top:1px solid #e8e8e5}.error-breakdown span{display:flex;justify-content:space-between;gap:8px;border-bottom:1px solid #eee;padding:9px 11px 9px 0;font-size:10px}.error-breakdown b{font-size:11px;margin:0}.listen-pause-note{margin-top:14px;font-size:11px;color:#777}@media(max-width:700px){.listen-plan{grid-template-columns:1fr 1fr}.listen-plan article:nth-child(3){border-left:0;padding-left:0}.listen-summary .summary-metrics{grid-template-columns:repeat(3,minmax(0,1fr))}.error-breakdown{grid-template-columns:1fr 1fr}}@media(max-width:480px){.listen-head{align-items:start}.listen-head .primary,.listen-head .outline{padding:9px}.listen-overview,.listen-stage,.listen-summary{padding:18px}.listen-stage h3{margin-top:32px;font-size:22px}.listen-summary .summary-metrics{grid-template-columns:1fr 1fr}.error-breakdown{grid-template-columns:1fr}}";
 function Listening(p: {
   words: Word[];
   highlights: ReadingHighlight[];
@@ -4629,36 +4633,17 @@ function Listening(p: {
   setReviews: (x: ListeningReview[]) => void;
   persistedSession: ListeningSession | null;
   setPersistedSession: (x: ListeningSession | null) => void;
+  date: string;
+  theme: DailyTheme;
 }) {
-  const [settings, setSettings] = useState<ListeningSettings>({
-      accent: "British English",
-      voice: "",
-      speed: 1,
-      wordCount: 10,
-      chunkCount: 8,
-      sentenceCount: 5,
-      miniCount: 2,
-    }),
-    [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]),
-    [session, setSession] = useState<ListeningSession | null>(
-      p.persistedSession,
-    ),
-    [answer, setAnswer] = useState(""),
-    [checked, setChecked] = useState<boolean | null>(null),
-    [replays, setReplays] = useState(0),
-    [mistake, setMistake] = useState("Knew it but did not recognize the sound");
+  const compatibleSession = (candidate: ListeningSession | null) =>
+    candidate?.queue.every((item) => "source" in item) ? candidate : null;
+  const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const [themeContext, setThemeContext] = useState<ThemeContextInput | null>(null);
+  const [session, setSession] = useState<ListeningSession | null>(() => compatibleSession(p.persistedSession));
+  const [answer, setAnswer] = useState("");
+  const [checked, setChecked] = useState<boolean | null>(null);
   useEffect(() => {
-    setSettings(
-      load("ielts-listening-settings", {
-        accent: "British English",
-        voice: "",
-        speed: 1,
-        wordCount: 10,
-        chunkCount: 8,
-        sentenceCount: 5,
-        miniCount: 2,
-      }),
-    );
     const refresh = () => setVoices(window.speechSynthesis.getVoices());
     refresh();
     window.speechSynthesis.onvoiceschanged = refresh;
@@ -4667,182 +4652,95 @@ function Listening(p: {
     };
   }, []);
   useEffect(() => {
-    localStorage.setItem("ielts-listening-settings", JSON.stringify(settings));
-  }, [settings]);
-  const items = useMemo(() => {
-    const word: ListeningItem[] = p.words.map((w, i) => ({
-      id: "word-" + i,
-      sourceId: w.word,
-      sourceType: "word_bank",
-      trainingType: "word",
-      text: w.word,
-      meaning: w.zh,
-      context: w.example,
-    }));
-    const chunk: ListeningItem[] = [
-      ...p.words
-        .filter((w) => w.collocation)
-        .map((w, i) => ({
-          id: "chunk-word-" + i,
-          sourceId: w.word,
-          sourceType: "word_bank",
-          trainingType: "chunk" as const,
-          text: w.collocation,
-          meaning: w.zh,
-          context: w.example,
-        })),
-      ...p.highlights
-        .filter((h) => h.type === "phrase")
-        .map((h) => ({
-          id: "chunk-" + h.id,
-          sourceId: h.id,
-          sourceType: "reading_highlight",
-          trainingType: "chunk" as const,
-          text: h.text,
-          meaning: h.meaning,
-          context: h.context,
-        })),
-      ...p.materials
-        .filter((m) => m.type === "phrase")
-        .map((m) => ({
-          id: "chunk-write-" + m.id,
-          sourceId: m.id,
-          sourceType: "writing_material",
-          trainingType: "chunk" as const,
-          text: m.content,
-          meaning: m.meaning,
-          context: m.example,
-        })),
-    ];
-    const sentence: ListeningItem[] = [
-      ...p.words
-        .filter((w) => w.example)
-        .map((w, i) => ({
-          id: "sentence-word-" + i,
-          sourceId: w.word,
-          sourceType: "word_bank",
-          trainingType: "sentence" as const,
-          text: w.example,
-          meaning: w.zh,
-          context: w.example,
-        })),
-      ...p.highlights
-        .filter((h) => h.type === "sentence" || h.type === "complex_sentence")
-        .map((h) => ({
-          id: "sentence-" + h.id,
-          sourceId: h.id,
-          sourceType: "reading_highlight",
-          trainingType: "sentence" as const,
-          text: h.text,
-          meaning: h.meaning,
-          context: h.context,
-        })),
-      ...p.materials
-        .filter((m) => m.type === "sentence")
-        .map((m) => ({
-          id: "sentence-write-" + m.id,
-          sourceId: m.id,
-          sourceType: "writing_material",
-          trainingType: "sentence" as const,
-          text: m.content,
-          meaning: m.meaning,
-          context: m.example,
-        })),
-    ];
-    return {
-      word,
-      chunk,
-      sentence,
-      mini: sentence.length
-        ? [
-            {
-              id: "mini-1",
-              sourceId: "recent-material",
-              sourceType: "combined_context",
-              trainingType: "mini" as const,
-              text: sentence
-                .slice(0, 3)
-                .map((x) => x.text)
-                .join(" "),
-              context: sentence
-                .slice(0, 3)
-                .map((x) => x.text)
-                .join(" "),
-            },
-          ]
-        : [],
-    };
-  }, [p.words, p.highlights, p.materials]);
+    if (!p.date) return;
+    setThemeContext(load<ThemeContextInput | null>(`ielts-theme-context-${p.date}`, null));
+  }, [p.date]);
+  useEffect(() => {
+    const restored = compatibleSession(p.persistedSession);
+    if (!restored || restored.id === session?.id) return;
+    setSession(restored);
+    setAnswer(restored.currentAnswer || "");
+    setChecked(restored.checked ?? null);
+  }, [p.persistedSession, session?.id]);
+  const plan = useMemo(
+    () => generateListeningPlan({
+      dateKey: p.date || "listening-initial",
+      theme: themeContext,
+      fallbackTheme: p.theme,
+      words: p.words,
+      reviews: p.reviews,
+      highlights: p.highlights,
+      materials: p.materials,
+    }),
+    [p.date, p.theme, p.words, p.reviews, p.highlights, p.materials, themeContext],
+  );
   const current = session?.queue[session.index];
-  const running = p.active?.taskId === p.task.id;
-  const speak = (text: string) => {
+  const updateSession = (next: ListeningSession) => {
+    setSession(next);
+    p.setPersistedSession(next);
+  };
+  const running = session?.status === "active" && p.active?.taskId === p.task.id && p.active.isRunning;
+  const speak = (replay = false) => {
+    if (!current || typeof window === "undefined") return;
     window.speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(text);
-    const preferred =
-      voices.find((v) => v.name === settings.voice) ||
-      voices.find((v) =>
-        settings.accent === "British English"
-          ? /en-GB/i.test(v.lang)
-          : /en-US/i.test(v.lang),
-      );
+    const u = new SpeechSynthesisUtterance(current.text);
+    const preferred = voices.find((voice) => /en-GB/i.test(voice.lang));
     if (preferred) u.voice = preferred;
-    u.rate = settings.speed;
+    u.rate = 1;
     window.speechSynthesis.speak(u);
-    setReplays((x) => x + 1);
+    if (replay && session)
+      updateSession({ ...session, currentReplays: session.currentReplays + 1 });
   };
   const begin = () => {
-    const queue = [
-      ...items.word.slice(0, settings.wordCount),
-      ...items.chunk.slice(0, settings.chunkCount),
-      ...items.sentence.slice(0, settings.sentenceCount),
-      ...items.mini.slice(0, settings.miniCount),
-    ];
-    if (!queue.length) return;
     const next: ListeningSession = {
-      id: Date.now().toString(),
-      queue,
+      id: `listening-${Date.now()}`,
+      planId: plan.id,
+      date: p.date || localDate(),
+      theme: plan.theme,
+      queue: plan.items,
       index: 0,
       answers: [],
       startedAt: new Date().toISOString(),
       status: "active",
+      currentAnswer: "",
+      currentReplays: 0,
     };
-    setSession(next);
-    p.setPersistedSession(next);
+    updateSession(next);
     p.start(p.task);
     setAnswer("");
     setChecked(null);
-    setReplays(0);
   };
   const check = () => {
-    if (!current) return;
-    setChecked(normalize(answer) === normalize(current.text));
+    if (!current || !session || !running) return;
+    const result = evaluateListeningAnswer(current, answer);
+    setChecked(result);
+    updateSession({ ...session, currentAnswer: answer, checked: result });
   };
-  const rate = (rating: "again" | "hard" | "good" | "easy") => {
+  const nextItem = () => {
     if (!current || checked === null || !session) return;
-    const days =
-      rating === "again"
-        ? 0
-        : rating === "hard"
-          ? 1
-          : rating === "good"
-            ? 4
-            : 8;
+    const mistakeType: ListeningErrorType | "" = checked ? "" : classifyListeningError({
+      item: current,
+      answer,
+      replays: session.currentReplays,
+      knownWords: p.words.map((word) => word.word),
+    });
     const next = new Date();
-    next.setDate(next.getDate() + days);
+    next.setDate(next.getDate() + (checked ? 4 : 0));
     const record: ListeningReview = {
       id: Date.now().toString(),
-      sourceType: current.sourceType,
+      sourceType: current.source,
       sourceId: current.sourceId,
       trainingType: current.trainingType,
       text: current.text,
+      meaning: current.meaning,
       userAnswer: answer,
       correct: checked,
-      rating,
-      mistakeType: checked ? "" : mistake,
+      rating: checked ? "good" : "again",
+      mistakeType,
       lastReviewedAt: localDate(),
       nextReviewAt: localDate(next),
       reviewCount: 1,
-      replays,
+      replays: session.currentReplays,
     };
     p.setReviews([...p.reviews, record]);
     const nextSession = {
@@ -4856,34 +4754,105 @@ function Listening(p: {
         ...session.answers,
         {
           itemId: current.id,
+          answer,
           correct: checked,
-          replays,
-          mistakeType: checked ? "" : mistake,
+          replays: session.currentReplays,
+          mistakeType,
         },
       ],
+      currentAnswer: "",
+      currentReplays: 0,
+      checked: undefined,
     };
-    setSession(nextSession);
-    p.setPersistedSession(nextSession);
+    if (nextSession.status === "complete") {
+      const completed = { ...nextSession, duration: p.seconds };
+      const performance = buildListeningPerformance({
+        sessionId: completed.id,
+        date: completed.date,
+        duration: p.seconds,
+        theme: completed.theme,
+        answers: completed.answers,
+      });
+      const stored = load<ListeningPerformance[]>("ielts-listening-performance", []);
+      localStorage.setItem("ielts-listening-performance", JSON.stringify([
+        ...stored.filter((item) => item.sessionId !== completed.id),
+        performance,
+      ]));
+      updateSession(completed);
+      p.finish();
+    } else updateSession(nextSession);
     setAnswer("");
     setChecked(null);
-    setReplays(0);
   };
-  const total =
-    settings.wordCount +
-    settings.chunkCount +
-    settings.sentenceCount +
-    settings.miniCount;
-  const insight = [
-    "Knew it but did not recognize the sound",
-    "Connected speech",
-    "Spelling",
-    "Vocabulary",
-    "Lost attention",
-    "Too fast",
-  ].map(
-    (x) => [x, p.reviews.filter((r) => r.mistakeType === x).length] as const,
-  );
+  const pauseOrResume = () => {
+    if (!session) return;
+    if (running) {
+      p.pause();
+      updateSession({ ...session, status: "paused" });
+    } else {
+      p.start(p.task);
+      updateSession({ ...session, status: "active" });
+    }
+  };
+  const counts = (type: ListeningType) => plan.items.filter((item) => item.trainingType === type).length;
   const done = session?.answers.length || 0;
+  return (
+    <section className="listening">
+      <style>{listeningCss}</style>
+      <div className="listen-head">
+        <div>
+          <p className="eyebrow">LISTENING TRAINING</p>
+          <h2>Today's Listening</h2>
+        </div>
+        {session && session.status !== "complete" && (
+          <button className="outline" onClick={pauseOrResume}>{running ? "Pause" : "Resume"}</button>
+        )}
+      </div>
+      {!session || session.status === "complete" ? (
+        <>
+          <section className="listen-overview">
+            <p className="eyebrow">TODAY'S LISTENING</p>
+            <h3>{plan.theme}</h3>
+            <p>{plan.subtopics.join(" · ")}</p>
+            <div className="listen-meta"><span>{plan.items.length} items</span><span>about 15 min</span><span>British English · 1x</span></div>
+            <div className="listen-plan">
+              <article><b>Word Recognition</b><small>{counts("word")} items</small></article>
+              <article><b>Chunk Recognition</b><small>{counts("chunk")} items</small></article>
+              <article><b>Sentence Dictation</b><small>{counts("sentence")} items</small></article>
+              <article><b>Mini Listening</b><small>{counts("mini")} item</small></article>
+            </div>
+            <button className="primary" onClick={begin}>START TRAINING</button>
+          </section>
+          {session?.status === "complete" && <SessionSummary session={session} />}
+        </>
+      ) : current ? (
+        <>
+          <div className="listen-session-bar"><span>Today's Listening</span><b>{done + 1} / {session.queue.length}</b><span>{running ? "Training" : "Paused"}</span></div>
+          <article className="listen-stage">
+            <div className="listen-stage-top"><span>{current.trainingType === "word" ? "WORD RECOGNITION" : current.trainingType === "chunk" ? "CHUNK RECOGNITION" : current.trainingType === "sentence" ? "SENTENCE DICTATION" : "MINI LISTENING"}</span><span>Replay ×{session.currentReplays}</span></div>
+            <h3>{current.trainingType === "word" ? "What did you hear?" : current.trainingType === "chunk" ? "Type the phrase you hear." : current.trainingType === "sentence" ? "Write the sentence you hear." : "Listen, then type the key idea."}</h3>
+            <p>{current.trainingType === "mini" ? "Transcript stays hidden until you check your answer." : "Use replay when you genuinely need it."}</p>
+            <div className="listen-controls"><button className="listen-play" onClick={() => speak(false)} disabled={!running}>● Play audio</button><button onClick={() => speak(true)} disabled={!running}>Replay</button></div>
+            <input className="listen-answer" value={answer} onChange={(event) => { const value = event.target.value; setAnswer(value); updateSession({ ...session, currentAnswer: value }); }} placeholder="Type what you heard…" disabled={checked !== null || !running} />
+            {checked === null ? (
+              <div className="listen-check"><small>{answer.trim() ? answer.trim().split(/\s+/).length : 0} words</small><button className="primary" onClick={check} disabled={!answer.trim() || !running}>CHECK</button></div>
+            ) : (
+              <div className="listen-result">
+                <p className={checked ? "correct" : "wrong"}>{checked ? "Correct." : "Not quite."}</p>
+                <p>Your answer<br /><strong>{answer || "—"}</strong></p>
+                <p>Correct answer<br /><strong>{current.text}</strong></p>
+                {current.meaning && <p>Meaning · {current.meaning}</p>}
+                {!checked && <p className="listen-diagnosis">自动诊断：{listeningErrorLabel[classifyListeningError({ item: current, answer, replays: session.currentReplays, knownWords: p.words.map((word) => word.word) })]}</p>}
+                <button className="primary listen-next" onClick={nextItem}>{done + 1 === session.queue.length ? "FINISH SESSION" : "NEXT"}</button>
+              </div>
+            )}
+            {!running && <p className="listen-pause-note">训练已暂停。恢复后继续计时与作答。</p>}
+          </article>
+        </>
+      ) : null}
+    </section>
+  );
+  /* Previous settings-heavy Listening UI retained temporarily for migration reference.
   return (
     <section className="listening">
       <style>{listeningCss}</style>
@@ -5154,52 +5123,49 @@ function Listening(p: {
       </div>
     </section>
   );
+} */
 }
 function normalize(text: string) {
   return text
     .toLowerCase()
-    .replace(/[^a-z0-9\\s]/g, "")
-    .replace(/\\s+/g, " ")
+    .replace(/[^a-z0-9\s]/g, "")
+    .replace(/\s+/g, " ")
     .trim();
 }
-function SessionSummary(p: {
-  session: ListeningSession;
-  seconds: number;
-  finish: () => void;
-}) {
-  const correct = p.session.answers.filter((x) => x.correct).length,
-    replays = p.session.answers.reduce((a, x) => a + x.replays, 0),
-    accuracy = p.session.answers.length
-      ? Math.round((correct / p.session.answers.length) * 100)
-      : 0;
+function SessionSummary(p: { session: ListeningSession }) {
+  const performance = buildListeningPerformance({
+    sessionId: p.session.id,
+    date: p.session.date,
+    duration: p.session.duration || 0,
+    theme: p.session.theme,
+    answers: p.session.answers,
+  });
   return (
     <div className="listen-summary">
-      <p className="eyebrow">LISTENING COMPLETE</p>
-      <h2>Good work. Let the errors return at the right time.</h2>
-      <div>
+      <p className="eyebrow">SESSION COMPLETE</p>
+      <h2>训练已保存，下一次会从今天的错误继续出题。</h2>
+      <div className="summary-metrics">
         <span>
-          Time<b>{formatMinutes(p.seconds)}</b>
+          Time<b>{formatMinutes(performance.duration)}</b>
         </span>
         <span>
-          Items<b>{p.session.answers.length}</b>
+          Accuracy<b>{performance.accuracy}%</b>
         </span>
         <span>
-          Accuracy<b>{accuracy}%</b>
+          Correct<b>{performance.correctItems} / {performance.totalItems}</b>
         </span>
         <span>
-          Correct<b>{correct}</b>
+          Replay<b>{performance.replayCount}</b>
         </span>
         <span>
-          Replays<b>{replays}</b>
-        </span>
-        <span>
-          Added to Review
-          <b>{p.session.answers.filter((x) => !x.correct).length}</b>
+          Main weakness<b>{performance.primaryWeakness ? listeningErrorLabel[performance.primaryWeakness] : "—"}</b>
         </span>
       </div>
-      <button className="primary" onClick={p.finish}>
-        Finish Session & Save Time
-      </button>
+      <div className="error-breakdown">
+        {(Object.keys(listeningErrorLabel) as ListeningErrorType[]).map((type) => (
+          <span key={type}>{listeningErrorLabel[type]}<b>{performance.errorBreakdown[type]}</b></span>
+        ))}
+      </div>
     </div>
   );
 }
