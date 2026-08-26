@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { calculateProgress } from "./progressEngine";
 import {
   ReviewItem,
@@ -9,6 +9,15 @@ import {
   scheduleReview,
   feedback,
 } from "./reviewEngine";
+import {
+  buildDailyReviewPlan,
+  exerciseFor,
+  isListeningReview,
+  ratingForResult,
+  reviewDataIssue,
+  reviewModuleLabel,
+  type ReviewResult,
+} from "./reviewQueue";
 import {
   startBrowserTranscription,
   SpeechController,
@@ -27,18 +36,69 @@ import {
   makeInboxItem,
   normalizeVocabulary,
 } from "./vocabularyService";
+import {
+  currentVocabularySection,
+  parseVocabularyCurriculumUpload,
+  type VocabularyCurriculum,
+  type VocabularyCurriculumProgress,
+} from "./vocabularyCurriculumService";
+import {
+  emptyMastery,
+  generateDailyVocabularyPlan,
+  type DailyVocabularyPlan,
+  type VocabularyDimension,
+  type VocabularyMastery,
+} from "./vocabularyPlanner";
+import { dimensionLabel, promptForDimension } from "./vocabularyEvaluator";
 import { generateSupervisorMessage } from "./supervisor";
+import { GlobalStudyTimer } from "./GlobalStudyTimer";
+import { activeStudySeconds, getTodayStudyTime, timerCategories, type ActiveStudySession, type StudySession as GlobalSession, type TimerCategory } from "./studySessionService";
+import {
+  aggregateStudyCandles,
+  buildDailyStudyCandle,
+  formatStudyHours,
+  formatStudyHoursAndMinutes,
+  studySecondsForDate,
+  type DailyStudyCandle,
+  type StudyTimeCandle,
+} from "./studyTimeChart";
 import {
   getDailyQuote,
   getDailyQuoteIndex,
   getNextQuoteIndex,
-  getSkillUpdate,
-  getTodayStudy,
   getYesterdayStudySeconds,
 } from "./dashboardService";
 import {
+  asScoreSnapshot,
+  formatAssessmentMonth,
+  getAssessmentForMonth,
+  getPreviousAssessment,
+  monthFromDateKey,
+  monthlySkillKeys,
+  type MonthlySkillAssessment,
+  type MonthlySkillKey,
+} from "./monthlyAssessmentService";
+import {
+  analyseSpeakingResponse,
+  allSpeakingResponses,
+  createSpeakingSession,
+  fallbackSpeakingTheme,
+  getSpeakingPart,
+  isSpeakingSessionComplete,
+  nextPartThreeQuestion,
+  withSpeakingPart,
+  type SpeakingResponse,
+  type SpeakingSession,
+  type SpeakingThemeContext,
+} from "./speakingService";
+import {
   analyseReadingImages,
   buildThemeContext,
+  invalidateReadingAnalysisCache,
+  isSuspiciousDuplicate,
+  readingAnalysisVersion,
+  type ReadingAnalysisOutcome,
+  type ThemeContext,
   ReadingPerformance,
 } from "./readingAnalysis";
 import {
@@ -63,6 +123,15 @@ import {
   type CurriculumBook,
   type CurriculumProgress,
 } from "./curriculumService";
+import {
+  currentWritingSection,
+  parseWritingCurriculumUpload,
+  type WritingCurriculum,
+  type WritingCurriculumProgress,
+  type WritingStage,
+} from "./writingCurriculumService";
+import { generateDailyWritingPlan, type DailyWritingPlan } from "./writingGenerator";
+import { evaluateWritingStage, type WritingFeedback } from "./writingEvaluator";
 
 type Category =
   | "listening"
@@ -83,25 +152,8 @@ type Task = {
   type: TaskType;
 };
 type DailyPlan = { date: string; tasks: Task[] };
-type StudySession = {
-  id: string;
-  taskId: string;
-  category: Category;
-  startTime: string;
-  endTime: string;
-  duration: number;
-  date: string;
-  articleId?: string;
-};
-type ActiveStudy = {
-  id: string;
-  taskId: string;
-  category: Category;
-  startTime: string;
-  accumulatedSeconds: number;
-  isRunning: boolean;
-  articleId?: string;
-};
+type StudySession = GlobalSession & { articleId?: string };
+type ActiveStudy = ActiveStudySession & { articleId?: string; isRunning?: boolean };
 type DailyReview = {
   date: string;
   completed: string;
@@ -154,9 +206,12 @@ type ReadingArticle = {
   content: string;
   createdAt: string;
   completedAt?: string;
-  status: "in_progress" | "completed";
+  status: "in_progress" | "completed" | "failed";
   imageUrls?: string[];
   imageNames?: string[];
+  imageFileIds?: string[];
+  imageHashes?: string[];
+  contentHash?: string;
   mainTopic?: string;
   subTopics?: string[];
   summary?: string;
@@ -168,6 +223,14 @@ type ReadingArticle = {
   sourceText?: string;
   aiStatus?: "pending" | "analysing" | "completed" | "failed";
   failedImageIndexes?: number[];
+  analysisVersion?: string;
+  analysedAt?: string;
+  analysisProvider?: string;
+  analysisModel?: string;
+  sourceTextLength?: number;
+  analysisFailureCode?: string;
+  analysisFailureReason?: string;
+  suspiciousDuplicate?: boolean;
 };
 type ReadingHighlight = {
   id: string;
@@ -234,6 +297,20 @@ type ArgumentCard = {
   keywords: string;
   relatedPhrases: string;
   createdAt: string;
+};
+type WritingStageState = {
+  value: string;
+  feedback?: WritingFeedback;
+  submittedAt?: string;
+  completed?: boolean;
+};
+type WritingSession = {
+  id: string;
+  date: string;
+  theme: string;
+  question: string;
+  activeStage: WritingStage;
+  stages: Record<WritingStage, WritingStageState>;
 };
 type ListeningType = GeneratedListeningItem["trainingType"];
 type ListeningItem = GeneratedListeningItem;
@@ -353,7 +430,7 @@ const defaultTasks: Task[] = [
     id: "speaking",
     title: "口语训练",
     category: "speaking",
-    description: "Part 2 · 观点展开",
+    description: "Part 1–3 · 语音回答",
     targetMinutes: 45,
     completed: false,
     type: "core",
@@ -446,7 +523,7 @@ export default function Home() {
   const [route, setRoute] = useState<
       | "home"
       | "words"
-      | "training"
+      | "speaking"
       | "reading"
       | "listening"
       | "writing"
@@ -463,6 +540,10 @@ export default function Home() {
     }),
     [now, setNow] = useState(0),
     [words, setWords] = useState(baseWords),
+    [vocabularyCurriculum, setVocabularyCurriculum] = useState<VocabularyCurriculum | null>(null),
+    [vocabularyCurriculumProgress, setVocabularyCurriculumProgress] = useState<VocabularyCurriculumProgress | null>(null),
+    [dailyVocabularyPlan, setDailyVocabularyPlan] = useState<DailyVocabularyPlan | null>(null),
+    [vocabularyMastery, setVocabularyMastery] = useState<Record<string, VocabularyMastery>>({}),
     [word, setWord] = useState(0),
     [reveal, setReveal] = useState(false),
     [editing, setEditing] = useState<string | null>(null),
@@ -473,13 +554,20 @@ export default function Home() {
     [readingNotes, setReadingNotes] = useState<ReadingNote[]>([]),
     [writingMaterials, setWritingMaterials] = useState<WritingMaterial[]>([]),
     [argumentsCards, setArgumentsCards] = useState<ArgumentCard[]>([]),
+    [writingCurriculum, setWritingCurriculum] = useState<WritingCurriculum | null>(null),
+    [writingCurriculumProgress, setWritingCurriculumProgress] = useState<WritingCurriculumProgress | null>(null),
+    [dailyWritingPlan, setDailyWritingPlan] = useState<DailyWritingPlan | null>(null),
+    [writingSession, setWritingSession] = useState<WritingSession | null>(null),
     [listeningReviews, setListeningReviews] = useState<ListeningReview[]>([]),
     [listeningSession, setListeningSession] = useState<ListeningSession | null>(
       null,
     ),
+    [speakingSession, setSpeakingSession] = useState<SpeakingSession | null>(null),
+    [speakingHistory, setSpeakingHistory] = useState<SpeakingSession[]>([]),
     [curriculumBook, setCurriculumBook] = useState<CurriculumBook | null>(null),
     [curriculumProgress, setCurriculumProgress] = useState<CurriculumProgress | null>(null),
     [snapshots, setSnapshots] = useState<ProgressSnapshot[]>([]),
+    [monthlyAssessments, setMonthlyAssessments] = useState<MonthlySkillAssessment[]>([]),
     [userProgress, setUserProgress] = useState<UserProgress>({
       currentLevel: "B1",
       target: "7.0",
@@ -488,6 +576,7 @@ export default function Home() {
     [reviewLogs, setReviewLogs] = useState<ReviewLog[]>([]),
     [theme, setTheme] = useState<DailyTheme>(automaticTheme("")),
     [dailyProgress, setDailyProgress] = useState<DailyProgressPoint[]>([]),
+    [dailyStudyCandles, setDailyStudyCandles] = useState<DailyStudyCandle[]>([]),
     [settlementTimeReached, setSettlementTimeReached] = useState(false),
     [ready, setReady] = useState(false);
   useEffect(() => {
@@ -500,8 +589,29 @@ export default function Home() {
   useEffect(() => {
     if (!today) return;
     setPlan(load(planKey, initialPlan(today)));
-    setSessions(load("ielts-study-sessions", []));
-    setActive(load("ielts-active-study", null));
+    const savedSessions = load<any[]>("ielts-study-sessions", []).map((session) => session.startedAt ? session : ({
+      ...session,
+      startedAt: session.startTime,
+      endedAt: session.endTime,
+      pausedDuration: 0,
+      status: "completed",
+      createdAt: session.startTime || new Date().toISOString(),
+    }));
+    const savedActive = load<any>("ielts-active-study", null);
+    setSessions(savedSessions);
+    setActive(savedActive ? (savedActive.startedAt ? savedActive : {
+      id: savedActive.id,
+      category: timerCategories.includes(savedActive.category) ? savedActive.category : "reading",
+      startedAt: savedActive.startTime || new Date().toISOString(),
+      duration: 0,
+      pausedDuration: savedActive.accumulatedSeconds || 0,
+      status: savedActive.isRunning ? "active" : "paused",
+      pausedAt: savedActive.isRunning ? undefined : new Date().toISOString(),
+      createdAt: savedActive.startTime || new Date().toISOString(),
+      date: localDate(new Date(savedActive.startTime || Date.now())),
+      isRunning: !!savedActive.isRunning,
+      articleId: savedActive.articleId,
+    }) : null);
     setReview(
       load(reviewKey, {
         date: today,
@@ -511,17 +621,49 @@ export default function Home() {
       }),
     );
     setWords(load("ielts-words", baseWords));
-    setArticles(load("ielts-reading-articles", []));
+    setVocabularyCurriculum(load("ielts-vocabulary-curriculum", null));
+    setVocabularyCurriculumProgress(load("ielts-vocabulary-curriculum-progress", null));
+    setDailyVocabularyPlan(load(`ielts-vocabulary-plan-${today}`, null));
+    setVocabularyMastery(load("ielts-vocabulary-mastery", {}));
+    setArticles(
+      load<ReadingArticle[]>("ielts-reading-articles", []).map((article) =>
+        article.analysisVersion === readingAnalysisVersion
+          ? article
+          : {
+              ...article,
+              status: "failed" as const,
+              aiStatus: "failed" as const,
+              title: "分析需要重试",
+              mainTopic: undefined,
+              subTopics: [],
+              summary: undefined,
+              concepts: [],
+              vocabulary: [],
+              usefulExpressions: [],
+              arguments: [],
+              sourceText: "",
+              content: "",
+              analysisFailureReason: "旧版按文件名生成的分析已失效；请重新分析当前文章图片。",
+            },
+      ),
+    );
     setHighlights(load("ielts-reading-highlights", []));
     setReviewCards(load("ielts-reading-cards", []));
     setReadingNotes(load("ielts-reading-notes", []));
     setWritingMaterials(load("ielts-writing-materials", []));
     setArgumentsCards(load("ielts-argument-cards", []));
+    setWritingCurriculum(load("ielts-writing-curriculum", null));
+    setWritingCurriculumProgress(load("ielts-writing-curriculum-progress", null));
+    setDailyWritingPlan(load(`ielts-writing-plan-${today}`, null));
+    setWritingSession(load(`ielts-writing-session-${today}`, null));
     setListeningReviews(load("ielts-listening-reviews", []));
     setListeningSession(load("ielts-listening-session", null));
+    setSpeakingSession(load("ielts-speaking-session", null));
+    setSpeakingHistory(load("ielts-speaking-history", []));
     setCurriculumBook(load("ielts-listening-curriculum", null));
     setCurriculumProgress(load("ielts-listening-curriculum-progress", null));
     setSnapshots(load("ielts-progress-snapshots", []));
+    setMonthlyAssessments(load("ielts-monthly-skill-assessments", []));
     setUserProgress(
       load("ielts-user-progress", { currentLevel: "B1", target: "7.0" }),
     );
@@ -529,6 +671,7 @@ export default function Home() {
     setReviewLogs(load("ielts-review-logs", []));
     setTheme(load("ielts-theme-" + today, automaticTheme(today)));
     setDailyProgress(load("ielts-daily-progress", []));
+    setDailyStudyCandles(load("ielts-daily-study-candles", []));
     setReady(true);
   }, [planKey, reviewKey, today]);
   useEffect(() => {
@@ -538,6 +681,10 @@ export default function Home() {
     localStorage.setItem("ielts-active-study", JSON.stringify(active));
     localStorage.setItem(reviewKey, JSON.stringify(review));
     localStorage.setItem("ielts-words", JSON.stringify(words));
+    localStorage.setItem("ielts-vocabulary-curriculum", JSON.stringify(vocabularyCurriculum));
+    localStorage.setItem("ielts-vocabulary-curriculum-progress", JSON.stringify(vocabularyCurriculumProgress));
+    localStorage.setItem(`ielts-vocabulary-plan-${today}`, JSON.stringify(dailyVocabularyPlan));
+    localStorage.setItem("ielts-vocabulary-mastery", JSON.stringify(vocabularyMastery));
     localStorage.setItem("ielts-reading-articles", JSON.stringify(articles));
     localStorage.setItem("ielts-reading-cards", JSON.stringify(reviewCards));
     localStorage.setItem(
@@ -548,6 +695,10 @@ export default function Home() {
       "ielts-argument-cards",
       JSON.stringify(argumentsCards),
     );
+    localStorage.setItem("ielts-writing-curriculum", JSON.stringify(writingCurriculum));
+    localStorage.setItem("ielts-writing-curriculum-progress", JSON.stringify(writingCurriculumProgress));
+    localStorage.setItem(`ielts-writing-plan-${today}`, JSON.stringify(dailyWritingPlan));
+    localStorage.setItem(`ielts-writing-session-${today}`, JSON.stringify(writingSession));
     localStorage.setItem(
       "ielts-listening-reviews",
       JSON.stringify(listeningReviews),
@@ -556,17 +707,24 @@ export default function Home() {
       "ielts-listening-session",
       JSON.stringify(listeningSession),
     );
+    localStorage.setItem("ielts-speaking-session", JSON.stringify(speakingSession));
+    localStorage.setItem("ielts-speaking-history", JSON.stringify(speakingHistory));
     localStorage.setItem("ielts-listening-curriculum", JSON.stringify(curriculumBook));
     localStorage.setItem(
       "ielts-listening-curriculum-progress",
       JSON.stringify(curriculumProgress),
     );
     localStorage.setItem("ielts-progress-snapshots", JSON.stringify(snapshots));
+    localStorage.setItem(
+      "ielts-monthly-skill-assessments",
+      JSON.stringify(monthlyAssessments),
+    );
     localStorage.setItem("ielts-user-progress", JSON.stringify(userProgress));
     localStorage.setItem("ielts-review-items", JSON.stringify(reviewItems));
     localStorage.setItem("ielts-review-logs", JSON.stringify(reviewLogs));
     localStorage.setItem("ielts-theme-" + today, JSON.stringify(theme));
     localStorage.setItem("ielts-daily-progress", JSON.stringify(dailyProgress));
+    localStorage.setItem("ielts-daily-study-candles", JSON.stringify(dailyStudyCandles));
   }, [
     ready,
     planKey,
@@ -576,37 +734,41 @@ export default function Home() {
     reviewKey,
     review,
     words,
+    vocabularyCurriculum,
+    vocabularyCurriculumProgress,
+    dailyVocabularyPlan,
+    vocabularyMastery,
     articles,
     highlights,
     reviewCards,
     writingMaterials,
     argumentsCards,
+    writingCurriculum,
+    writingCurriculumProgress,
+    dailyWritingPlan,
+    writingSession,
     listeningReviews,
     listeningSession,
+    speakingSession,
+    speakingHistory,
     curriculumBook,
     curriculumProgress,
     snapshots,
+    monthlyAssessments,
     userProgress,
     reviewItems,
     reviewLogs,
     theme,
     today,
     dailyProgress,
+    dailyStudyCandles,
   ]);
   useEffect(() => {
-    if (!active?.isRunning) return;
+    if (active?.status !== "active") return;
     const id = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(id);
-  }, [active?.isRunning]);
-  const activeSeconds = active
-    ? active.accumulatedSeconds +
-      (active.isRunning
-        ? Math.max(
-            0,
-            Math.floor((now - new Date(active.startTime).getTime()) / 1000),
-          )
-        : 0)
-    : 0;
+  }, [active?.status]);
+  const activeSeconds = activeStudySeconds(active, now || Date.now());
   const todaySessions = useMemo(
     () => sessions.filter((x) => x.date === today),
     [sessions, today],
@@ -615,20 +777,23 @@ export default function Home() {
     todaySessions
       .filter((x) => x.taskId === taskId)
       .reduce((a, x) => a + x.duration, 0) +
-    (active?.taskId === taskId ? activeSeconds : 0);
+    (active?.category === plan.tasks.find((task) => task.id === taskId)?.category ? activeSeconds : 0);
   const pause = () => {
-    if (!active?.isRunning) return;
+    if (active?.status !== "active") return;
     setActive({
       ...active,
-      accumulatedSeconds: activeSeconds,
+      status: "paused",
+      pausedAt: new Date().toISOString(),
       isRunning: false,
     });
   };
   const resume = () => {
-    if (active && !active.isRunning)
+    if (active?.status === "paused")
       setActive({
         ...active,
-        startTime: new Date().toISOString(),
+        pausedDuration: active.pausedDuration + Math.max(0, Math.floor((Date.now() - new Date(active.pausedAt || Date.now()).getTime()) / 1000)),
+        pausedAt: undefined,
+        status: "active",
         isRunning: true,
       });
   };
@@ -639,19 +804,21 @@ export default function Home() {
       const end = new Date();
       const session: StudySession = {
         id: active.id,
-        taskId: active.taskId,
         category: active.category,
-        startTime: active.startTime,
-        endTime: end.toISOString(),
+        startedAt: active.startedAt,
+        endedAt: end.toISOString(),
         duration: finalSeconds,
-        date: localDate(new Date(active.startTime)),
+        pausedDuration: active.pausedDuration,
+        status: "completed",
+        createdAt: active.createdAt,
+        date: active.date,
         articleId: active.articleId,
       };
       setSessions([...sessions, session]);
       setPlan({
         ...plan,
         tasks: plan.tasks.map((t) =>
-          t.id === active.taskId
+          t.category === active.category
             ? { ...t, completed: secondsFor(t.id) >= t.targetMinutes * 60 }
             : t,
         ),
@@ -661,26 +828,35 @@ export default function Home() {
     setActive(null);
     setNow(Date.now());
   };
-  const startTask = (task: Task, articleId?: string) => {
-    if (active && active.taskId !== task.id) {
+  const startCategory = (category: TimerCategory) => {
+    if (active && active.category !== category) {
       setNotice("请先结束当前计时，再开始另一项训练。");
-      setRoute("home");
       return;
     }
-    if (active?.taskId === task.id) {
+    if (active?.status === "paused") {
       resume();
     } else {
+      const stamp = new Date();
       setActive({
-        id: Date.now().toString(),
-        taskId: task.id,
-        category: task.category,
-        startTime: new Date().toISOString(),
-        accumulatedSeconds: 0,
+        id: `study-${Date.now()}`,
+        category,
+        startedAt: stamp.toISOString(),
+        duration: 0,
+        pausedDuration: 0,
+        status: "active",
+        createdAt: stamp.toISOString(),
+        date: localDate(stamp),
         isRunning: true,
-        articleId,
       });
     }
     setNotice("");
+  };
+  const startTask = (task: Task, articleId?: string) => {
+    if (!timerCategories.includes(task.category as TimerCategory)) {
+      setNotice("全局计时器仅记录阅读、听力、口语和写作。");
+      return;
+    }
+    startCategory(task.category as TimerCategory);
     setRoute(
       task.category === "vocabulary"
         ? "words"
@@ -690,9 +866,11 @@ export default function Home() {
             ? "listening"
             : task.category === "writing"
               ? "writing"
+              : task.category === "speaking"
+                ? "speaking"
               : task.category === "review"
                 ? "review"
-                : "training",
+                : "home",
     );
   };
   const updateTask = (
@@ -727,10 +905,16 @@ export default function Home() {
   };
   const deleteOptional = (id: string) =>
     setPlan({ ...plan, tasks: plan.tasks.filter((t) => t.id !== id) });
-  const rate = (mode: string) => {
+  const rate = (mode: string, dimension: VocabularyDimension = "meaningRecognition", targetWord?: string) => {
     const days = mode === "again" ? 1 : mode === "good" ? 3 : 7;
+    const activeWord = targetWord ? words.find((item) => normalizeVocabulary(item.word) === normalizeVocabulary(targetWord)) : words[word];
+    if (activeWord) setVocabularyMastery((previous) => {
+      const current = previous[normalizeVocabulary(activeWord.word)] || emptyMastery();
+      const nextValue = mode === "again" ? Math.max(0, current[dimension] - 1) : Math.min(5, current[dimension] + (mode === "easy" ? 2 : 1));
+      return { ...previous, [normalizeVocabulary(activeWord.word)]: { ...current, [dimension]: nextValue } };
+    });
     setWords(
-      words.map((x, i) => (i === word ? { ...x, due: "+" + days + " 天" } : x)),
+      words.map((x) => (activeWord && normalizeVocabulary(x.word) === normalizeVocabulary(activeWord.word) ? { ...x, due: "+" + days + " 天" } : x)),
     );
     setWord((word + 1) % words.length);
     setReveal(false);
@@ -759,31 +943,37 @@ export default function Home() {
     ],
   );
   useEffect(() => {
-    if (
-      !ready ||
-      !today ||
-      !settlementTimeReached ||
-      dailyProgress.some((point) => point.date === today)
-    )
-      return;
-    const previous = dailyProgress
-      .filter((x) => x.date < today)
-      .sort((a, b) => a.date.localeCompare(b.date))
-      .at(-1);
-    const point = calculateDailyProgressScore({
-      date: today,
-      sessions,
-      tasks: plan.tasks,
-      reviews: reviewLogs,
-      previous,
+    if (!ready || !today) return;
+    const dates = new Set(
+      sessions
+        .filter((session) => (timerCategories as readonly string[]).includes(session.category))
+        .map((session) => session.date)
+        .filter((date) => date < today || (date === today && settlementTimeReached)),
+    );
+    if (settlementTimeReached) dates.add(today);
+    if (!dates.size) return;
+    setDailyStudyCandles((previous) => {
+      const next = [...previous];
+      [...dates]
+        .sort((a, b) => a.localeCompare(b))
+        .forEach((date) => {
+          if (next.some((candle) => candle.date === date)) return;
+          const previousClose = next
+            .filter((candle) => candle.date < date)
+            .sort((a, b) => a.date.localeCompare(b.date))
+            .at(-1)?.close ?? 0;
+          const settledAt = new Date(`${date}T20:00:00`).toISOString();
+          next.push(buildDailyStudyCandle({
+            date,
+            sessions,
+            previousClose,
+            active: date === today ? active : null,
+            settledAt,
+          }));
+        });
+      return next.sort((a, b) => a.date.localeCompare(b.date));
     });
-    if (point)
-      setDailyProgress((prev) =>
-        [...prev, { ...point, settledAt: new Date().toISOString() }].sort((a, b) =>
-          a.date.localeCompare(b.date),
-        ),
-      );
-  }, [ready, today, settlementTimeReached, sessions, plan.tasks, reviewLogs, dailyProgress]);
+  }, [ready, today, settlementTimeReached, sessions, active]);
   useEffect(() => {
     if (!ready) return;
     const existing = new Set(
@@ -812,6 +1002,10 @@ export default function Home() {
           prompt: w.zh || `Recall the meaning of ${w.word}`,
           answer: w.word,
           context: w.example,
+          sourceWordId: w.word.toLowerCase(),
+          sourceDefinition: w.zh,
+          sourceExample: w.example,
+          debugSource: { sourceId: w.word, sourceType: "vocabulary-word" },
           difficultyLevel: 2,
           masteryStage: 2,
         }),
@@ -829,6 +1023,8 @@ export default function Home() {
           prompt: c.content,
           answer: c.answer,
           context: c.context,
+          sourceExample: c.context,
+          debugSource: { sourceId: c.id, sourceType: "reading-card" },
           difficultyLevel: 2,
           masteryStage: 2,
         }),
@@ -843,9 +1039,13 @@ export default function Home() {
           sourceId: l.id,
           skill: "listening",
           reviewType: l.trainingType,
-          prompt: `Type what you heard / recall: ${l.meaning || l.trainingType}`,
+          prompt: "听音识别：点击播放，写下你听到的词或短语。",
           answer: l.text,
           context: "Listening source: " + l.sourceType,
+          sourceDefinition: l.meaning,
+          sourceExample: l.text,
+          audioText: l.text,
+          debugSource: { sourceId: l.id, sourceType: "listening-review" },
           difficultyLevel: 2,
           masteryStage: 2,
         }),
@@ -863,6 +1063,8 @@ export default function Home() {
           prompt: m.meaning || `Produce this ${m.type}`,
           answer: m.content,
           context: m.example,
+          sourceExample: m.example,
+          debugSource: { sourceId: m.id, sourceType: "writing-material" },
           difficultyLevel: 3,
           masteryStage: 3,
         }),
@@ -877,40 +1079,6 @@ export default function Home() {
     writingMaterials,
     reviewItems,
   ]);
-  useEffect(() => {
-    if (
-      !ready ||
-      mastery.overall === null ||
-      snapshots.some((x) => x.date === today)
-    )
-      return;
-    setSnapshots((prev) => [
-      ...prev,
-      {
-        id: "snapshot-" + Date.now(),
-        date: today,
-        overall: mastery.overall,
-        reading: mastery.skills.reading.score,
-        listening: mastery.skills.listening.score,
-        speaking: mastery.skills.speaking.score,
-        writing: mastery.skills.writing.score,
-        vocabulary: mastery.skills.vocabulary.score,
-      },
-    ]);
-  }, [
-    ready,
-    today,
-    mastery.overall,
-    mastery.skills.reading.score,
-    mastery.skills.listening.score,
-    mastery.skills.speaking.score,
-    mastery.skills.writing.score,
-    mastery.skills.vocabulary.score,
-    snapshots,
-  ]);
-  const currentTask = active
-    ? plan.tasks.find((x) => x.id === active.taskId)
-    : plan.tasks.find((x) => x.category === "speaking");
   const readingTask = plan.tasks.find((x) => x.category === "reading")!;
   const addWord = (highlight: ReadingHighlight) => {
     if (
@@ -961,8 +1129,8 @@ export default function Home() {
             <i>◔</i>听力训练
           </button>
           <button
-            className={route === "training" ? "active" : ""}
-            onClick={() => setRoute("training")}
+            className={route === "speaking" ? "active" : ""}
+            onClick={() => setRoute("speaking")}
           >
             <i>◌</i>口语训练
           </button>
@@ -1002,6 +1170,8 @@ export default function Home() {
                     ? "读过的东西，留下来。"
                     : route === "listening"
                       ? "以前听不出来的，现在能听出来。"
+                      : route === "speaking"
+                        ? "先开口，再把话说完整。"
                       : route === "writing"
                         ? "从材料，到可调用的观点。"
                         : route === "review"
@@ -1034,6 +1204,14 @@ export default function Home() {
             notice={notice}
             mastery={mastery}
             snapshots={snapshots}
+            monthlyAssessments={monthlyAssessments}
+            saveMonthlyAssessment={(assessment) =>
+              setMonthlyAssessments((previous) =>
+                previous.some((item) => item.month === assessment.month)
+                  ? previous
+                  : [...previous, assessment],
+              )
+            }
             userProgress={userProgress}
             setUserProgress={setUserProgress}
             articles={articles}
@@ -1045,6 +1223,7 @@ export default function Home() {
             words={words}
             theme={theme}
             dailyProgress={dailyProgress}
+            dailyStudyCandles={dailyStudyCandles}
           />
         )}
         {route === "reading" && (
@@ -1090,17 +1269,45 @@ export default function Home() {
         )}
         {route === "writing" && (
           <Writing
+            date={today}
+            fallbackTheme={theme}
             materials={writingMaterials}
             setMaterials={setWritingMaterials}
             argumentsCards={argumentsCards}
             setArgumentsCards={setArgumentsCards}
             words={words}
+            curriculum={writingCurriculum}
+            setCurriculum={setWritingCurriculum}
+            curriculumProgress={writingCurriculumProgress}
+            setCurriculumProgress={setWritingCurriculumProgress}
+            plan={dailyWritingPlan}
+            setPlan={setDailyWritingPlan}
+            session={writingSession}
+            setSession={setWritingSession}
+            reviewItems={reviewItems}
+            setReviewItems={setReviewItems}
             task={plan.tasks.find((x) => x.category === "writing")!}
             active={active}
             seconds={activeSeconds}
             start={startTask}
             pause={pause}
             finish={finish}
+          />
+        )}
+        {route === "speaking" && (
+          <Speaking
+            date={today}
+            fallbackTheme={theme}
+            words={words}
+            highlights={highlights}
+            materials={writingMaterials}
+            argumentsCards={argumentsCards}
+            session={speakingSession}
+            setSession={setSpeakingSession}
+            history={speakingHistory}
+            setHistory={setSpeakingHistory}
+            reviewItems={reviewItems}
+            setReviewItems={setReviewItems}
           />
         )}
         {route === "words" && (
@@ -1111,6 +1318,14 @@ export default function Home() {
             reveal={reveal}
             setReveal={setReveal}
             rate={rate}
+            date={today}
+            curriculum={vocabularyCurriculum}
+            setCurriculum={setVocabularyCurriculum}
+            curriculumProgress={vocabularyCurriculumProgress}
+            setCurriculumProgress={setVocabularyCurriculumProgress}
+            plan={dailyVocabularyPlan}
+            setPlan={setDailyVocabularyPlan}
+            mastery={vocabularyMastery}
             task={plan.tasks.find((x) => x.category === "vocabulary")}
             active={active}
             seconds={activeSeconds}
@@ -1126,19 +1341,6 @@ export default function Home() {
             setReviewItems={setReviewItems}
           />
         )}
-        {route === "training" && currentTask && (
-          <Training
-            task={currentTask}
-            active={active}
-            seconds={activeSeconds}
-            start={startTask}
-            pause={pause}
-            resume={resume}
-            finish={finish}
-            back={() => setRoute("home")}
-            notice={notice}
-          />
-        )}
         {route === "review" && (
           <ReviewCenter
             items={reviewItems}
@@ -1148,6 +1350,7 @@ export default function Home() {
           />
         )}
       </section>
+      <GlobalStudyTimer active={active} seconds={activeSeconds} start={startCategory} pause={pause} resume={resume} finish={finish} />
     </main>
   );
 }
@@ -1156,8 +1359,8 @@ function Dashboard(p: {
   plan: DailyPlan;
   sessions: StudySession[];
   allSessions: StudySession[];
-  active: ActiveStudy | null;
-  activeSeconds: number;
+  active?: ActiveStudy | null;
+  activeSeconds?: number;
   start: (x: Task) => void;
   pause: () => void;
   resume: () => void;
@@ -1172,6 +1375,8 @@ function Dashboard(p: {
   notice: string;
   mastery: ReturnType<typeof calculateProgress>;
   snapshots: ProgressSnapshot[];
+  monthlyAssessments?: MonthlySkillAssessment[];
+  saveMonthlyAssessment?: (assessment: MonthlySkillAssessment) => void;
   userProgress: UserProgress;
   setUserProgress: (x: UserProgress) => void;
   articles: ReadingArticle[];
@@ -1183,16 +1388,17 @@ function Dashboard(p: {
   words: Word[];
   theme: DailyTheme;
   dailyProgress: DailyProgressPoint[];
+  dailyStudyCandles?: DailyStudyCandle[];
 }) {
   const elapsed = (task: Task) =>
     p.sessions
       .filter((x) => x.taskId === task.id)
       .reduce((a, x) => a + x.duration, 0) +
-    (p.active?.taskId === task.id ? p.activeSeconds : 0);
+    (p.active?.category === task.category ? (p.activeSeconds || 0) : 0);
   const base = p.plan.tasks.filter((x) => x.type !== "optional"),
     totalTarget = base.reduce((a, x) => a + x.targetMinutes * 60, 0),
     totalSeconds =
-      p.sessions.reduce((a, x) => a + x.duration, 0) + p.activeSeconds,
+      p.sessions.reduce((a, x) => a + x.duration, 0) + (p.activeSeconds || 0),
     completed = p.plan.tasks.filter((x) => x.completed).length,
     pct = p.plan.tasks.length
       ? Math.round((completed / p.plan.tasks.length) * 100)
@@ -1806,9 +2012,14 @@ function ProgressCommand(p: {
 function QuietOverview(p: {
   mastery: ReturnType<typeof calculateProgress>;
   snapshots: ProgressSnapshot[];
+  monthlyAssessments?: MonthlySkillAssessment[];
+  saveMonthlyAssessment?: (assessment: MonthlySkillAssessment) => void;
   allSessions: StudySession[];
   plan: DailyPlan;
   dailyProgress: DailyProgressPoint[];
+  dailyStudyCandles?: DailyStudyCandle[];
+  active?: ActiveStudy | null;
+  activeSeconds?: number;
 }) {
   const [quoteIndex, setQuoteIndex] = useState(() =>
     getDailyQuoteIndex(p.plan.date),
@@ -1817,10 +2028,13 @@ function QuietOverview(p: {
     setQuoteIndex(getDailyQuoteIndex(p.plan.date));
   }, [p.plan.date]);
   const quote = getDailyQuote(quoteIndex);
-  const study = getTodayStudy(p.allSessions, p.plan.date);
+  const timerStudy = getTodayStudyTime(p.allSessions, p.active || null, p.plan.date);
+  const study = {
+    total: timerStudy.total,
+    rows: (["reading", "listening", "speaking", "writing"] as TimerCategory[]).map((key) => ({ key, label: key[0].toUpperCase() + key.slice(1), seconds: timerStudy[key] })),
+  };
   const yesterdaySeconds = getYesterdayStudySeconds(p.allSessions, p.plan.date);
   const studyDelta = study.total - yesterdaySeconds;
-  const skillUpdate = getSkillUpdate(p.mastery.skills, p.snapshots, p.plan.date);
   return (
     <section className="dashboard-overview">
       <article className="daily-quote">
@@ -1872,171 +2086,316 @@ function QuietOverview(p: {
         )}
       </section>
 
-      <section className="dashboard-section skill-update">
-        <div className="dashboard-heading">
-          <p className="eyebrow">AI SKILL UPDATE</p>
-          <small>0–100 SKILL INDEX</small>
-        </div>
-        <div className="skill-index-list">
-          {skillUpdate.rows.map((row) => (
-            <div key={row.key}>
-              <span>{row.key[0].toUpperCase() + row.key.slice(1)}</span>
-              <strong>{row.score === null ? "—" : row.score.toFixed(1)}</strong>
-              <em
-                className={
-                  row.delta === null || row.delta === 0
-                    ? "flat"
-                    : row.delta > 0
-                      ? "positive"
-                      : "negative"
-                }
-              >
-                {row.delta === null || row.delta === 0
-                  ? "—"
-                  : `${row.delta > 0 ? "↑ +" : "↓ "}${Math.abs(row.delta).toFixed(1)}`}
-              </em>
-            </div>
-          ))}
-        </div>
-        <p className="skill-insight">{skillUpdate.insight}</p>
-      </section>
+      <MonthlySkillAssessmentPanel
+        month={monthFromDateKey(p.plan.date)}
+        assessments={p.monthlyAssessments ?? []}
+        onSave={p.saveMonthlyAssessment}
+      />
 
-      <IELTSIndexChart
-        points={p.dailyProgress}
+      <StudyHoursChart
+        candles={p.dailyStudyCandles ?? []}
         sessions={p.allSessions}
         today={p.plan.date}
+        active={p.active || null}
       />
     </section>
   );
 }
 
-type ChartRange = "day" | "week" | "month";
-type IndexCandle = ReturnType<typeof toDailyProgressCandles>[number] & {
-  studySeconds: number;
+type MonthlyAssessmentDraft = Record<MonthlySkillKey | "overallEstimate", string> & {
+  notes: string;
 };
 
-function candleGroupKey(date: string, range: ChartRange) {
-  if (range === "day") return date;
-  if (range === "month") return date.slice(0, 7);
-  const weekStart = new Date(`${date}T12:00:00`);
-  weekStart.setDate(weekStart.getDate() - ((weekStart.getDay() + 6) % 7));
-  return weekStart.toISOString().slice(0, 10);
+const monthlyAssessmentLabels: Record<MonthlySkillKey | "overallEstimate", string> = {
+  reading: "Reading",
+  listening: "Listening",
+  speaking: "Speaking",
+  writing: "Writing",
+  vocabulary: "Vocabulary",
+  overallEstimate: "Overall",
+};
+const monthlyAssessmentScoreKeys = [
+  ...monthlySkillKeys,
+  "overallEstimate",
+] as const;
+
+function blankMonthlyAssessmentDraft(): MonthlyAssessmentDraft {
+  return {
+    reading: "",
+    listening: "",
+    speaking: "",
+    writing: "",
+    vocabulary: "",
+    overallEstimate: "",
+    notes: "",
+  };
 }
 
-function groupIndexCandles(
-  points: DailyProgressPoint[],
-  sessions: StudySession[],
-  range: ChartRange,
-) {
-  const candles = toDailyProgressCandles(points);
-  const groups = new Map<string, IndexCandle[]>();
-  candles.forEach((candle) => {
-    const key = candleGroupKey(candle.date, range);
-    groups.set(key, [...(groups.get(key) ?? []), { ...candle, studySeconds: 0 }]);
-  });
-  return [...groups.entries()]
-    .map(([key, items]) => {
-      const first = items[0], last = items.at(-1)!;
-      const dates = new Set(items.map((item) => item.date));
-      return {
-        ...last,
-        date: range === "day" ? last.date : key,
-        open: first.open,
-        high: Math.max(...items.map((item) => item.high)),
-        low: Math.min(...items.map((item) => item.low)),
-        close: last.close,
-        delta: last.close - first.open,
-        studySeconds: sessions
-          .filter((session) => dates.has(session.date))
-          .reduce((sum, session) => sum + session.duration, 0),
-      };
-    })
-    .slice(range === "day" ? -20 : -12);
+function MonthlySkillAssessmentPanel(p: {
+  month: string;
+  assessments: MonthlySkillAssessment[];
+  onSave?: (assessment: MonthlySkillAssessment) => void;
+}) {
+  const current = getAssessmentForMonth(p.assessments, p.month);
+  const previous = getPreviousAssessment(p.assessments, p.month);
+  const [formOpen, setFormOpen] = useState(false);
+  const [draft, setDraft] = useState<MonthlyAssessmentDraft>(blankMonthlyAssessmentDraft);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    setFormOpen(false);
+    setDraft(blankMonthlyAssessmentDraft());
+    setError("");
+  }, [p.month, current?.id]);
+
+  const score = (key: MonthlySkillKey | "overallEstimate") => current?.[key];
+  const delta = (key: MonthlySkillKey | "overallEstimate") => {
+    const value = score(key);
+    const before = previous?.[key];
+    return typeof value === "number" && typeof before === "number"
+      ? value - before
+      : null;
+  };
+  const save = () => {
+    if (!p.onSave) return;
+    const entries = monthlyAssessmentScoreKeys;
+    const values = Object.fromEntries(
+      entries.map((key) => [key, draft[key].trim() ? Number(draft[key]) : undefined]),
+    ) as Record<MonthlySkillKey | "overallEstimate", number | undefined>;
+    const invalid = entries.some(
+      (key) =>
+        draft[key].trim() &&
+        (!Number.isFinite(values[key]) || values[key]! < 4 || values[key]! > 9),
+    );
+    if (invalid) {
+      setError("分数请填写 4.0–9.0 之间的 IELTS 分值。");
+      return;
+    }
+    if (!entries.some((key) => typeof values[key] === "number")) {
+      setError("请至少填写一项正式测评结果。");
+      return;
+    }
+    p.onSave({
+      id: `monthly-assessment-${Date.now()}`,
+      month: p.month,
+      assessedAt: new Date().toISOString(),
+      ...values,
+      previousMonth: asScoreSnapshot(previous),
+      notes: draft.notes.trim() ? [draft.notes.trim()] : undefined,
+    });
+  };
+
+  return (
+    <section className="dashboard-section monthly-assessment">
+      <div className="dashboard-heading">
+        <div>
+          <p className="eyebrow">MONTHLY SKILL ASSESSMENT</p>
+        </div>
+        <small>{formatAssessmentMonth(p.month)}</small>
+      </div>
+      <div className="monthly-score-list">
+        {monthlyAssessmentScoreKeys.map((key) => {
+          const change = delta(key);
+          return (
+            <div key={key}>
+              <span>{monthlyAssessmentLabels[key]}</span>
+              <strong>{typeof score(key) === "number" ? score(key)!.toFixed(1) : "—"}</strong>
+              <em className={change === null || change === 0 ? "flat" : change > 0 ? "positive" : "negative"}>
+                {change === null || change === 0
+                  ? "—"
+                  : `${change > 0 ? "↑ +" : "↓ "}${Math.abs(change).toFixed(1)}`}
+              </em>
+            </div>
+          );
+        })}
+      </div>
+      <div className="monthly-assessment-status">
+        {current ? (
+          <>
+            <p>本月已完成正式能力测评。下一次更新：{nextAssessmentMonth(p.month)}</p>
+            <strong>本月已完成</strong>
+          </>
+        ) : (
+          <>
+            <p>等待本月能力测评。日常训练只记录学习时长，不自动更新能力分数。</p>
+            <button className="outline" onClick={() => setFormOpen(true)}>开始本月测评</button>
+          </>
+        )}
+      </div>
+      {formOpen && !current ? (
+        <form className="monthly-assessment-form" onSubmit={(event) => { event.preventDefault(); save(); }}>
+          <p>完成正式月度测评后，录入本次 IELTS 分值。此处不会根据训练时长自动估分。</p>
+          <div>
+            {monthlyAssessmentScoreKeys.map((key) => (
+              <label key={key}>
+                <span>{monthlyAssessmentLabels[key]}</span>
+                <input
+                  type="number"
+                  min="4"
+                  max="9"
+                  step="0.5"
+                  inputMode="decimal"
+                  placeholder="—"
+                  value={draft[key]}
+                  onChange={(event) => setDraft((value) => ({ ...value, [key]: event.target.value }))}
+                />
+              </label>
+            ))}
+          </div>
+          <label className="monthly-notes">
+            <span>测评备注（可选）</span>
+            <input value={draft.notes} onChange={(event) => setDraft((value) => ({ ...value, notes: event.target.value }))} placeholder="例如：剑桥真题完整模拟" />
+          </label>
+          {error ? <small className="monthly-error">{error}</small> : null}
+          <footer>
+            <button type="button" className="outline" onClick={() => setFormOpen(false)}>取消</button>
+            <button type="submit" className="primary">保存本月结果</button>
+          </footer>
+        </form>
+      ) : null}
+    </section>
+  );
 }
 
-function IELTSIndexChart(p: {
-  points: DailyProgressPoint[];
+function nextAssessmentMonth(month: string) {
+  const [yearValue, monthValue] = month.split("-").map(Number);
+  const nextYear = monthValue === 12 ? yearValue + 1 : yearValue;
+  const nextMonth = monthValue === 12 ? 1 : monthValue + 1;
+  return `${nextYear}/${String(nextMonth).padStart(2, "0")}`;
+}
+
+type ChartRange = "day" | "week";
+function StudyHoursChart(p: {
+  candles: DailyStudyCandle[];
   sessions: StudySession[];
   today: string;
+  active: ActiveStudy | null;
 }) {
   const [range, setRange] = useState<ChartRange>("day");
-  const [hover, setHover] = useState<IndexCandle | null>(null);
-  const candles = groupIndexCandles(p.points, p.sessions, range);
+  const [hover, setHover] = useState<StudyTimeCandle | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const dragRef = useRef({ pointerId: -1, startX: 0, scrollLeft: 0 });
+  const candles = aggregateStudyCandles(p.candles, range);
+  const todayCandle = p.candles.find((candle) => candle.date === p.today);
+  const yesterdayCandle = [...p.candles]
+    .filter((candle) => candle.date < p.today)
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .at(-1);
+  const todayHours = todayCandle
+    ? todayCandle.close
+    : studySecondsForDate(p.sessions, p.today, p.active) / 3600;
   const last = candles.at(-1);
-  const format = (value: number) => Number(value.toFixed(1));
-  if (!last) {
-    return (
-      <section className="index-chart index-chart-empty">
-        <div className="dashboard-heading">
-          <p className="eyebrow">IELTS INDEX</p>
-          <span>TODAY · IN PROGRESS</span>
-        </div>
-        <strong>—</strong>
-        <p>Awaiting enough learning data for the first daily settlement.</p>
-      </section>
-    );
-  }
-  const changePercent = last.open ? (last.delta / last.open) * 100 : 0;
-  const width = 760, height = 270, left = 42, right = 14, top = 16, bottom = 34;
-  const plotWidth = width - left - right, plotHeight = height - top - bottom;
-  const low = Math.max(0, Math.min(...candles.map((candle) => candle.low)) - 2);
-  const high = Math.min(100, Math.max(...candles.map((candle) => candle.high)) + 2);
-  const domain = Math.max(4, high - low);
-  const y = (value: number) => top + ((high - value) / domain) * plotHeight;
-  const x = (index: number) => left + ((index + 0.5) * plotWidth) / candles.length;
-  const body = Math.max(12, Math.min(26, (plotWidth / candles.length) * 0.5));
+  const summary = range === "day"
+    ? {
+        title: "TODAY",
+        close: todayHours,
+        delta: todayHours - (yesterdayCandle?.close ?? 0),
+        open: yesterdayCandle?.close ?? 0,
+      }
+    : {
+        title: "THIS WEEK",
+        close: last?.close ?? 0,
+        delta: last?.changeHours ?? 0,
+        open: last?.open ?? 0,
+      };
+  const changePercent = summary.open ? (summary.delta / summary.open) * 100 : 0;
+  const height = 270, top = 16, bottom = 34, plotHeight = height - top - bottom;
+  const candleWidth = 16, candleGap = 8, candlePitch = candleWidth + candleGap;
+  const chartWidth = Math.max(640, candles.length * candlePitch + 24);
+  // This chart is a learning-hours scale, not an adaptive ability-score axis.
+  // Keep the current study phase comparable in both daily and weekly views.
+  const chartHigh = 4.3;
+  const ticks = [4, 3, 2, 1, 0];
+  const formatAxisHours = (value: number) => `${Number.isInteger(value) ? value : value.toFixed(1)}h`;
+  const y = (value: number) => top + ((chartHigh - value) / chartHigh) * plotHeight;
+  const x = (index: number) => 12 + index * candlePitch + candleWidth / 2;
+  const endOfWeek = (date: string) => {
+    const end = new Date(`${date}T12:00:00`);
+    end.setDate(end.getDate() + 6);
+    return end.toISOString().slice(0, 10);
+  };
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (viewport) viewport.scrollLeft = viewport.scrollWidth;
+  }, [range, candles.length]);
+  const startDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    dragRef.current = { pointerId: event.pointerId, startX: event.clientX, scrollLeft: viewport.scrollLeft };
+    viewport.setPointerCapture(event.pointerId);
+    setDragging(true);
+  };
+  const moveDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    const viewport = viewportRef.current;
+    if (!viewport || dragRef.current.pointerId !== event.pointerId) return;
+    viewport.scrollLeft = dragRef.current.scrollLeft - (event.clientX - dragRef.current.startX);
+  };
+  const endDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (dragRef.current.pointerId !== event.pointerId) return;
+    if (viewportRef.current?.hasPointerCapture(event.pointerId)) viewportRef.current.releasePointerCapture(event.pointerId);
+    dragRef.current.pointerId = -1;
+    setDragging(false);
+  };
   return (
     <section className="index-chart">
       <div className="index-chart-head">
         <div>
-          <p className="eyebrow">IELTS INDEX</p>
-          <h2>{format(last.close)}</h2>
-          <b className={last.delta < 0 ? "negative" : last.delta > 0 ? "positive" : "flat"}>
-            {last.delta >= 0 ? "+" : ""}{format(last.delta)} · {last.delta >= 0 ? "+" : ""}{format(changePercent)}%
+          <p className="eyebrow">{range === "day" ? "STUDY HOURS" : "THIS WEEK"}</p>
+          <h2>{formatStudyHours(summary.close)}</h2>
+          <b className={summary.delta < 0 ? "negative" : summary.delta > 0 ? "positive" : "flat"}>
+            {summary.delta >= 0 ? "+" : ""}{formatStudyHours(summary.delta)} · {summary.delta >= 0 ? "+" : ""}{changePercent.toFixed(1)}%
           </b>
         </div>
-        <span>{last.date === p.today && last.settledAt ? "TODAY · SETTLED" : "TODAY · IN PROGRESS"}</span>
+        <span>{todayCandle ? "TODAY · SETTLED" : "TODAY · IN PROGRESS"}</span>
       </div>
       <div className="index-candle-frame">
-        <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="IELTS 综合指数 K 线图">
-          {[high, (high + low) / 2, low].map((value) => (
-            <g key={value}>
-              <line x1={left} x2={width - right} y1={y(value)} y2={y(value)} className="index-grid" />
-              <text x="3" y={y(value) + 3} className="index-axis">{format(value)}</text>
-            </g>
-          ))}
-          {candles.map((candle, index) => {
-            const direction = candle.close > candle.open ? "up" : candle.close < candle.open ? "down" : "flat";
-            const topBody = Math.min(y(candle.open), y(candle.close));
-            const bodyHeight = direction === "flat" ? 3 : Math.max(8, Math.abs(y(candle.open) - y(candle.close)));
-            return (
-              <g key={candle.date} className="index-candle" tabIndex={0} onMouseEnter={() => setHover(candle)} onFocus={() => setHover(candle)}>
-                <line x1={x(index)} x2={x(index)} y1={y(candle.high)} y2={y(candle.low)} className={`index-wick ${direction}`} />
-                <rect x={x(index) - body / 2} y={direction === "flat" ? y(candle.close) - 1.5 : topBody} width={body} height={bodyHeight} rx="1" className={`index-body ${direction}`} />
-                <text x={x(index)} y={height - 9} textAnchor="middle" className="index-date">{candle.date.slice(5).replace("-", "/")}</text>
-              </g>
-            );
-          })}
-        </svg>
+        <div className="study-y-axis" aria-hidden="true">
+          {ticks.map((value) => <span key={value} style={{ top: y(value) - 5 }}>{formatAxisHours(value)}</span>)}
+        </div>
+        <div
+          ref={viewportRef}
+          className={`study-chart-viewport${dragging ? " is-dragging" : ""}`}
+          onPointerDown={startDrag}
+          onPointerMove={moveDrag}
+          onPointerUp={endDrag}
+          onPointerCancel={endDrag}
+        >
+          {candles.length ? <svg viewBox={`0 0 ${chartWidth} ${height}`} style={{ width: chartWidth, height }} role="img" aria-label="学习时长 K 线图">
+            {ticks.map((value) => <line key={value} x1="0" x2={chartWidth} y1={y(value)} y2={y(value)} className="index-grid" />)}
+            {candles.map((candle, index) => {
+              const direction = candle.close > candle.open ? "up" : candle.close < candle.open ? "down" : "flat";
+              const topBody = Math.min(y(candle.open), y(candle.close));
+              const bodyHeight = direction === "flat" ? 3 : Math.max(8, Math.abs(y(candle.open) - y(candle.close)));
+              return (
+                <g key={candle.date} className="index-candle" tabIndex={0} onMouseEnter={() => setHover(candle)} onFocus={() => setHover(candle)}>
+                  <line x1={x(index)} x2={x(index)} y1={y(candle.high)} y2={y(candle.low)} className={`index-wick ${direction}`} />
+                  <rect x={x(index) - candleWidth / 2} y={direction === "flat" ? y(candle.close) - 1.5 : topBody} width={candleWidth} height={bodyHeight} rx="1" className={`index-body ${direction}`} />
+                  <text x={x(index)} y={height - 9} textAnchor="middle" className="index-date">{range === "day" ? candle.date.slice(5).replace("-", "/") : candle.label}</text>
+                </g>
+              );
+            })}
+          </svg> : <p className="study-chart-empty">首根学习时长 K 线会在 20:00 自动生成。</p>}
+        </div>
         {hover && (
           <aside className="index-tooltip">
-            <b>{hover.date}</b>
-            <div><span>Open</span><strong>{format(hover.open)}</strong><span>High</span><strong>{format(hover.high)}</strong></div>
-            <div><span>Low</span><strong>{format(hover.low)}</strong><span>Close</span><strong>{format(hover.close)}</strong></div>
-            <em className={hover.delta < 0 ? "negative" : hover.delta > 0 ? "positive" : "flat"}>{hover.delta >= 0 ? "+" : ""}{format(hover.delta)} · {format(hover.open ? (hover.delta / hover.open) * 100 : 0)}%</em>
-            <small>Study Time · {formatMinutes(hover.studySeconds)}</small>
+            <b>{hover.range === "week" ? `${hover.date} ~ ${endOfWeek(hover.date)}` : hover.date}</b>
+            <div><span>Open</span><strong>{formatStudyHours(hover.open)}</strong><span>High</span><strong>{formatStudyHours(hover.high)}</strong></div>
+            <div><span>Low</span><strong>{formatStudyHours(hover.low)}</strong><span>Close</span><strong>{formatStudyHours(hover.close)}</strong></div>
+            <em className={hover.changeHours < 0 ? "negative" : hover.changeHours > 0 ? "positive" : "flat"}>{hover.changeHours >= 0 ? "+" : ""}{formatStudyHours(hover.changeHours)} · {hover.changeHours >= 0 ? "+" : ""}{hover.changePercent.toFixed(1)}%</em>
+            <small>{hover.range === "day" ? "Study Time" : "This Week"} · {formatStudyHoursAndMinutes(hover.close)}</small>
           </aside>
         )}
       </div>
       <div className="index-chart-footer">
         <div className="index-tabs">
-          {(["day", "week", "month"] as ChartRange[]).map((item) => (
+          {(["day", "week"] as ChartRange[]).map((item) => (
             <button key={item} className={range === item ? "active" : ""} onClick={() => { setRange(item); setHover(null); }}>
-              {item === "day" ? "日" : item === "week" ? "周" : "月"}
+              {item === "day" ? "日" : "周"}
             </button>
           ))}
         </div>
-        <small>{last.date === p.today && last.settledAt ? "20:00 已完成今日结算" : "20:00 自动结算每日指数"}</small>
+        <small>{todayCandle ? "20:00 已完成今日学习时长结算" : "20:00 自动结算每日学习时长"}</small>
       </div>
     </section>
   );
@@ -2262,27 +2621,22 @@ function ReviewCenter(p: {
   const [queue, setQueue] = useState<ReviewItem[] | null>(null),
     [index, setIndex] = useState(0),
     [answer, setAnswer] = useState(""),
-    [face, setFace] = useState<"front" | "back">("front"),
-    [typed, setTyped] = useState(false),
+    [revealed, setRevealed] = useState(false),
     [recording, setRecording] = useState(false),
     [message, setMessage] = useState(""),
     [started, setStarted] = useState(0),
-    [controller, setController] = useState<SpeechController | null>(null);
-  const due = dueQueue(p.items, 25),
+    [controller, setController] = useState<SpeechController | null>(null),
+    [attempts, setAttempts] = useState<Array<{ item: ReviewItem; result: ReviewResult }>>([]);
+  const plan = useMemo(() => buildDailyReviewPlan(p.items), [p.items]),
     item = queue?.[index],
-    mix = due.reduce(
-      (map, x) => ({
-        ...map,
-        [x.sourceModule]: (map[x.sourceModule] || 0) + 1,
-      }),
-      {} as Record<string, number>,
-    ),
+    exercise = item ? exerciseFor(item) : null,
+    dataIssue = item ? reviewDataIssue(item) : null,
     begin = () => {
-      setQueue(due);
+      setQueue(plan.items);
       setIndex(0);
-      setFace("front");
+      setRevealed(false);
       setAnswer("");
-      setTyped(false);
+      setAttempts([]);
       setStarted(Date.now());
     },
     voice = () => {
@@ -2293,106 +2647,143 @@ function ReviewCenter(p: {
       }
       const c = startBrowserTranscription((text) => {
         setAnswer(text);
-        setTyped(true);
         setRecording(false);
-        setMessage("转写完成，可编辑后查看答案。");
+        setMessage("已完成转写；查看参考答案后选择结果。");
       }, setMessage);
       if (c) {
         setController(c);
         setRecording(true);
-        setMessage("正在聆听，请说出答案。");
+        setMessage("正在听你回答。");
       }
     };
-  const rate = (rating: "again" | "hard" | "good" | "easy") => {
-    if (!item) return;
-    const matched =
-        typed && answer.trim()
-          ? feedback(item, answer).correct
-          : rating !== "again",
-      out = scheduleReview(
-        item,
-        matched ? rating : "again",
-        answer,
-        Date.now() - started,
-        matched ? "" : "Recall Failure",
-      );
+  const playReviewAudio = (replay = false) => {
+    if (!item || !isListeningReview(item)) return;
+    const text = item.audioText || item.answer;
+    if (item.audioUrl) {
+      const audio = new Audio(item.audioUrl);
+      audio.play().catch((error) => {
+        console.error("[Review] audio playback failed", { id: item.id, error });
+        setMessage("该题暂时缺少可播放的音频资源。");
+      });
+      return;
+    }
+    if (typeof window !== "undefined" && "speechSynthesis" in window && text) {
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = "en-GB";
+      utterance.rate = 0.86;
+      utterance.onerror = (error) => {
+        console.error("[Review] TTS failed", { id: item.id, error });
+        setMessage("该题暂时缺少可播放的音频资源。");
+      };
+      window.speechSynthesis.speak(utterance);
+      setMessage(replay ? "正在重播音频。" : "正在播放音频。");
+      return;
+    }
+    console.error("[Review] missing audio resource", { id: item.id, source: item.debugSource || item.sourceId });
+    setMessage("该题暂时缺少音频资源。");
+  };
+  const finishItem = (result: ReviewResult) => {
+    if (!item || !queue) return;
+    const out = scheduleReview(
+      item,
+      ratingForResult[result],
+      answer,
+      Date.now() - started,
+      result === "incorrect" ? "Recall Failure" : result === "partial" ? "Partial Recall" : "",
+    );
     p.setItems(p.items.map((x) => (x.id === item.id ? out.updated : x)));
     p.setLogs([...p.logs, out.log]);
-    if (index + 1 >= queue!.length) setQueue([]);
+    setAttempts([...attempts, { item, result }]);
+    if (index + 1 >= queue.length) setQueue([]);
     else {
       setIndex(index + 1);
-      setFace("front");
+      setRevealed(false);
       setAnswer("");
-      setTyped(false);
+      setMessage("");
       setStarted(Date.now());
     }
   };
   if (queue?.length === 0)
+    {
+      const mastered = attempts.filter((x) => x.result === "correct").length,
+        needsWork = attempts.length - mastered,
+        weak = Object.entries(
+          attempts.filter((x) => x.result !== "correct").reduce((all, x) => ({ ...all, [x.item.sourceModule]: (all[x.item.sourceModule] || 0) + 1 }), {} as Record<string, number>),
+        ).sort((a, b) => b[1] - a[1]).slice(0, 2).map(([source]) => reviewModuleLabel[source as ReviewItem["sourceModule"]]).join("、");
     return (
-      <section className="review-center review-simple">
-        <div>
-          <p className="eyebrow">TODAY'S REVIEW</p>
+      <section className="review-center review-simple review-complete">
+        <div className="review-complete-copy">
+          <p className="eyebrow">REVIEW COMPLETE</p>
           <h2>今日复习完成</h2>
+          <strong>{attempts.length} / {attempts.length}</strong>
+          <div><span>掌握 <b>{mastered}</b></span><span>仍需复习 <b>{needsWork}</b></span></div>
+          {weak && <p>主要薄弱项：{weak}</p>}
+          <p>下次复习已自动安排。</p>
           <button className="primary" onClick={() => setQueue(null)}>
-            返回
+            返回复习中心
           </button>
         </div>
       </section>
     );
+    }
   if (item)
     return (
-      <section className="review-center review-simple">
+      <section className="review-center review-simple review-training">
         <div className="simple-head">
           <span>
             {index + 1} / {queue.length}
           </span>
           <small>
-            ~ {Math.max(1, Math.ceil((queue.length - index) * 0.7))} min
+            剩约 {Math.max(1, Math.ceil((queue.length - index) * 0.75))} 分钟
           </small>
         </div>
         <article className="simple-card">
-          <p className="eyebrow">
-            {item.sourceModule.toUpperCase()} ·{" "}
-            {item.reviewType.replace("_", " ")}
-          </p>
-          <h2>{face === "front" ? item.prompt : item.answer}</h2>
-          {face === "front" ? (
+          <p className="eyebrow">{exercise!.label}</p>
+          {dataIssue ? (
+            <div className="review-data-error">
+              <h2>该复习项数据异常</h2>
+              <p>{dataIssue}。此题不会用于正式训练。</p>
+              <button className="outline" onClick={() => {
+                console.error("[Review] invalid item shown", { id: item.id, issue: dataIssue, source: item.debugSource || item.sourceId });
+                if (index + 1 >= queue.length) setQueue([]);
+                else { setIndex(index + 1); setStarted(Date.now()); }
+              }}>跳过此题</button>
+            </div>
+          ) : <>
+          <h2>{item.prompt}</h2>
+          {!revealed ? (
             <>
-              <p>回忆对应的英文表达。</p>
-              {typed && (
-                <textarea
-                  autoFocus
-                  value={answer}
-                  onChange={(e) => setAnswer(e.target.value)}
-                  placeholder="输入答案"
-                />
+              <p>{exercise!.instruction}</p>
+              {exercise!.requiresAudio && (
+                <div className="review-audio-controls">
+                  <button className="outline" onClick={() => playReviewAudio(false)}>🔊 播放音频</button>
+                  <button className="text-link" onClick={() => playReviewAudio(true)}>重播</button>
+                </div>
               )}
-              <div>
-                <button className="outline" onClick={voice}>
-                  {recording ? "停止录音" : "🎙 说出答案"}
-                </button>
-                <button className="primary" onClick={() => setFace("back")}>
-                  查看答案
-                </button>
-                <button className="text-link" onClick={() => setTyped(!typed)}>
-                  输入答案 ›
-                </button>
+              <textarea autoFocus value={answer} onChange={(e) => setAnswer(e.target.value)} placeholder={exercise!.answerHint} />
+              <div className="review-actions">
+                {exercise!.prefersVoice && <button className="outline" onClick={voice}>{recording ? "停止口述" : "开始口述"}</button>}
+                <button className="primary" onClick={() => setRevealed(true)}>查看参考答案</button>
               </div>
               {message && <small>{message}</small>}
             </>
           ) : (
             <>
-              <p className="card-context">{item.context}</p>
-              {typed && answer && <p>你的回答：{answer}</p>}
-              <div className="rating-row">
-                {(["again", "hard", "good", "easy"] as const).map((x) => (
-                  <button key={x} onClick={() => rate(x)}>
-                    {x}
-                  </button>
-                ))}
+              <div className="review-answer"><span>参考答案</span><b>{item.answer}</b></div>
+              {item.sourceDefinition && <p className="review-source-line">中文：{item.sourceDefinition}</p>}
+              {item.sourceExample && <p className="card-context">例句：{item.sourceExample}</p>}
+              {!item.sourceExample && item.context && <p className="card-context">来源：{item.context}</p>}
+              {answer && <p className="review-response">你的回答：{answer}</p>}
+              <p className="review-result-label">这次提取的结果如何？</p>
+              <div className="review-result-row">
+                <button onClick={() => finishItem("correct")}><b>掌握</b><small>准确回忆</small></button>
+                <button onClick={() => finishItem("partial")}><b>部分正确</b><small>稍后再复习</small></button>
+                <button onClick={() => finishItem("incorrect")}><b>未掌握</b><small>尽快重现</small></button>
               </div>
             </>
           )}
+          </>}
         </article>
       </section>
     );
@@ -2400,17 +2791,18 @@ function ReviewCenter(p: {
     <section className="review-center review-simple review-home">
       <p className="eyebrow">TODAY'S REVIEW</p>
       <h2>今日复习</h2>
-      <strong>{due.length}</strong>
-      <span>项待复习 · 约 {Math.max(1, Math.ceil(due.length * 0.7))} 分钟</span>
+      <strong>{plan.items.length}</strong>
+      <span>{plan.items.length ? `项待复习 · 预计约 ${plan.estimatedMinutes} 分钟` : "今天暂无到期复习"}</span>
       <p>
-        {Object.entries(mix)
+        {Object.entries(plan.moduleCounts)
+          .filter(([, count]) => count)
           .map(
             ([name, count]) =>
-              `${name[0].toUpperCase() + name.slice(1)} ${count}`,
+              `${reviewModuleLabel[name as ReviewItem["sourceModule"]]} ${count}`,
           )
-          .join(" · ")}
+          .join(" · ") || "系统会在重要问题到期时自动加入。"}
       </p>
-      <button className="primary" disabled={!due.length} onClick={begin}>
+      <button className="primary" disabled={!plan.items.length} onClick={begin}>
         开始复习
       </button>
     </section>
@@ -2886,51 +3278,285 @@ function DailyReviewBox(p: {
     </section>
   );
 }
-function Training(p: {
-  task: Task;
-  active: ActiveStudy | null;
-  seconds: number;
-  start: (x: Task) => void;
-  pause: () => void;
-  resume: () => void;
-  finish: () => void;
-  back: () => void;
-  notice: string;
+function Speaking(p: {
+  date: string;
+  fallbackTheme: DailyTheme;
+  words: Word[];
+  highlights: ReadingHighlight[];
+  materials: WritingMaterial[];
+  argumentsCards: ArgumentCard[];
+  session: SpeakingSession | null;
+  setSession: (session: SpeakingSession | null) => void;
+  history: SpeakingSession[];
+  setHistory: (sessions: SpeakingSession[]) => void;
+  reviewItems: ReviewItem[];
+  setReviewItems: (items: ReviewItem[]) => void;
 }) {
-  const running = p.active?.taskId === p.task.id;
-  return (
-    <div className="training-view">
-      <button className="back" onClick={p.back}>
-        ← 返回 Dashboard
-      </button>
-      <article>
-        <p className="eyebrow">{p.task.category.toUpperCase()} TRAINING</p>
-        <h2>{p.task.title}</h2>
-        <p>{p.task.description}</p>
-        <div className="focus-timer">
-          <time>{clock(running ? p.seconds : 0)}</time>
-          <span>目标 {p.task.targetMinutes} min</span>
+  const [theme, setTheme] = useState<SpeakingThemeContext | null>(null);
+  const [themeLoaded, setThemeLoaded] = useState(false);
+  const [controller, setController] = useState<SpeechController | null>(null);
+  const [fallbackOpen, setFallbackOpen] = useState(false);
+  const [fallbackAnswer, setFallbackAnswer] = useState("");
+  const [recordingStartedAt, setRecordingStartedAt] = useState(0);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [preparationSeconds, setPreparationSeconds] = useState(60);
+  const [notice, setNotice] = useState("");
+
+  useEffect(() => {
+    if (!p.date) return;
+    const stored = localStorage.getItem(`ielts-theme-context-${p.date}`);
+    let fromReading: SpeakingThemeContext | null = null;
+    try {
+      fromReading = stored ? JSON.parse(stored) as SpeakingThemeContext : null;
+    } catch {
+      fromReading = null;
+    }
+    const fallback = fallbackSpeakingTheme(
+      `${p.date}:${p.words.map((word) => word.word).join("-")}`,
+      p.fallbackTheme.topic,
+    );
+    setTheme(fromReading ?? {
+      ...fallback,
+      vocabulary: [
+        ...p.highlights
+          .filter((highlight) => highlight.type === "word" || highlight.type === "phrase")
+          .map((highlight) => highlight.text),
+        ...p.words.map((word) => word.word),
+      ].slice(0, 8),
+      usefulExpressions: p.materials.slice(0, 4).map((material) => material.content),
+      arguments: p.argumentsCards.slice(0, 3).map((card) => card.claim),
+    });
+    setThemeLoaded(true);
+  }, [p.date, p.fallbackTheme.topic, p.words, p.highlights, p.materials, p.argumentsCards]);
+
+  useEffect(() => {
+    if (!themeLoaded || !theme || !p.date) return;
+    if (!p.session || p.session.date !== p.date || !("activePart" in p.session)) {
+      p.setSession(createSpeakingSession(p.date, theme));
+    }
+  }, [p.date, p.session, p.setSession, theme, themeLoaded]);
+
+  useEffect(() => {
+    if (!p.session || getSpeakingPart(p.session).status !== "recording" || !recordingStartedAt) return;
+    const update = () => setRecordingSeconds(Math.max(0, Math.floor((Date.now() - recordingStartedAt) / 1000)));
+    update();
+    const timer = window.setInterval(update, 1000);
+    return () => window.clearInterval(timer);
+  }, [p.session, recordingStartedAt]);
+
+  useEffect(() => {
+    if (!p.session) return;
+    const activeProgress = getSpeakingPart(p.session);
+    if (activeProgress.status !== "preparing" || !activeProgress.preparationEndsAt) return;
+    const update = () => {
+      const remaining = Math.max(0, Math.ceil((activeProgress.preparationEndsAt! - Date.now()) / 1000));
+      setPreparationSeconds(remaining);
+      if (!remaining) p.setSession(withSpeakingPart(p.session!, p.session!.activePart, { ...activeProgress, status: "ready", preparationEndsAt: undefined }));
+    };
+    update();
+    const timer = window.setInterval(update, 1000);
+    return () => window.clearInterval(timer);
+  }, [p.session, p.setSession]);
+
+  const saveReviewEvidence = (completed: SpeakingSession) => {
+    const additions: ReviewItem[] = [];
+    allSpeakingResponses(completed).forEach((response) => {
+      const analysis = response.analysis;
+      if (analysis?.repeatedExpressions?.includes("i think")) {
+        additions.push(newReviewItem({
+          id: `speaking-expression-${response.id}`,
+          parentEntityId: completed.id,
+          sourceModule: "speaking",
+          sourceId: response.id,
+          skill: "speaking",
+          reviewType: "expression",
+          prompt: "替换口语中的重复表达：I think",
+          answer: "From my perspective,",
+          context: response.question,
+          difficultyLevel: 3,
+          masteryStage: 2,
+        }));
+      }
+      if (analysis?.grammarErrors?.length) {
+        additions.push(newReviewItem({
+          id: `speaking-grammar-${response.id}`,
+          parentEntityId: completed.id,
+          sourceModule: "speaking",
+          sourceId: response.id,
+          skill: "speaking",
+          reviewType: "grammar",
+          prompt: analysis.grammarErrors[0],
+          answer: "在下一次回答中用完整句检查主谓一致和比较级。",
+          context: response.transcript || response.question,
+          difficultyLevel: 3,
+          masteryStage: 2,
+        }));
+      }
+    });
+    const existing = new Set(p.reviewItems.map((item) => `${item.sourceId}:${item.reviewType}`));
+    const unique = additions.filter((item) => !existing.has(`${item.sourceId}:${item.reviewType}`)).slice(0, 3);
+    if (unique.length) p.setReviewItems([...p.reviewItems, ...unique]);
+  };
+
+  const progress = (updated: SpeakingSession, transcript: string) => {
+    const activePart = updated.activePart;
+    const current = getSpeakingPart(updated, activePart);
+    if (activePart === 1 && current.currentQuestionIndex + 1 < current.questions.length) {
+      p.setSession(withSpeakingPart(updated, 1, { ...current, currentQuestionIndex: current.currentQuestionIndex + 1, status: "ready" }));
+      return;
+    }
+    if (activePart === 1) {
+      const next = withSpeakingPart(updated, 1, { ...current, status: "completed" });
+      p.setSession({ ...next, activePart: 2, part2: { ...next.part2, status: "preparing", preparationEndsAt: Date.now() + 60_000 } });
+      return;
+    }
+    if (activePart === 2) {
+      const partTwoComplete = withSpeakingPart(updated, 2, { ...current, status: "completed" });
+      const generated = nextPartThreeQuestion({ theme: updated.theme, transcript, questionNumber: 0 });
+      const part3 = partTwoComplete.part3.responses.length
+        ? partTwoComplete.part3
+        : { ...partTwoComplete.part3, questions: [generated], currentQuestionIndex: 0, status: "ready" as const };
+      p.setSession({ ...partTwoComplete, activePart: 3, part3 });
+      return;
+    }
+    if (current.currentQuestionIndex + 1 < 2) {
+      const questionNumber = current.currentQuestionIndex + 1;
+      const nextQuestion = nextPartThreeQuestion({ theme: updated.theme, transcript, questionNumber });
+      p.setSession(withSpeakingPart(updated, 3, { ...current, questions: [...current.questions, nextQuestion], currentQuestionIndex: questionNumber, status: "ready" }));
+      return;
+    }
+    const partThreeComplete = withSpeakingPart(updated, 3, { ...current, status: "completed" });
+    if (isSpeakingSessionComplete(partThreeComplete)) {
+      const completed = { ...partThreeComplete, completedAt: new Date().toISOString() };
+      p.setSession(completed);
+      if (!p.history.some((session) => session.id === completed.id)) p.setHistory([completed, ...p.history]);
+      saveReviewEvidence(completed);
+    } else {
+      p.setSession(partThreeComplete);
+      setNotice("Part 3 已完成；其余 Part 的进度已保留，可随时切换继续。");
+    }
+  };
+
+  const submitAnswer = (text: string) => {
+    if (!p.session || !text.trim()) return;
+    const activePart = p.session.activePart;
+    const current = getSpeakingPart(p.session, activePart);
+    const response: SpeakingResponse = {
+      id: `speaking-response-${Date.now()}`,
+      sessionId: p.session.id,
+      part: activePart,
+      question: current.questions[current.currentQuestionIndex],
+      transcript: text.trim(),
+      duration: Math.max(1, Math.round((Date.now() - recordingStartedAt) / 1000)),
+      createdAt: new Date().toISOString(),
+      analysis: analyseSpeakingResponse(text.trim(), current.questions[current.currentQuestionIndex]),
+    };
+    const updated = withSpeakingPart(p.session, activePart, { ...current, responses: [...current.responses, response], status: "processing" });
+    p.setSession(updated);
+    setFallbackAnswer("");
+    setFallbackOpen(false);
+    setNotice("回答已保存，正在生成下一题。");
+    window.setTimeout(() => progress(updated, text.trim()), 350);
+  };
+
+  const beginVoice = () => {
+    if (!p.session) return;
+    const current = getSpeakingPart(p.session);
+    if (current.status === "preparing" || current.status === "completed") return;
+    const startedAt = Date.now();
+    setRecordingStartedAt(startedAt);
+    setRecordingSeconds(0);
+    const activeSession = withSpeakingPart(p.session, p.session.activePart, { ...current, status: "recording" });
+    const nextController = startBrowserTranscription(
+      (text) => submitAnswer(text),
+      () => {
+        p.setSession(withSpeakingPart(activeSession, activeSession.activePart, { ...getSpeakingPart(activeSession), status: "ready" }));
+        setFallbackOpen(true);
+        setNotice("当前浏览器无法完成语音转写，请输入回答。");
+      },
+    );
+    if (nextController) {
+      p.setSession(activeSession);
+      setController(nextController);
+      setNotice("正在录音，结束后会自动转写。");
+    }
+  };
+
+  const stopVoice = () => {
+    controller?.stop();
+    setController(null);
+    if (p.session) p.setSession(withSpeakingPart(p.session, p.session.activePart, { ...getSpeakingPart(p.session), status: "processing" }));
+    setNotice("正在转写回答。");
+  };
+
+  if (!p.session || !theme) return <section className="speaking-page" />;
+  const session = p.session;
+  const partLabels = ["Part 1", "Part 2", "Part 3"] as const;
+  const responses = allSpeakingResponses(session);
+  const activeProgress = getSpeakingPart(session);
+  const currentQuestion = activeProgress.questions[activeProgress.currentQuestionIndex];
+  const totalSeconds = responses.reduce((sum, response) => sum + response.duration, 0);
+  const repeatedThink = responses.filter((response) => response.analysis?.repeatedExpressions?.includes("i think")).length;
+  const mainProblem = responses.some((response) => response.analysis?.coherenceIssues?.length)
+    ? "回答展开不足"
+    : responses.some((response) => response.analysis?.grammarErrors?.length)
+      ? "句式准确性需要复查"
+      : "继续保持完整表达";
+
+  if (isSpeakingSessionComplete(session)) {
+    return (
+      <section className="speaking-page speaking-summary">
+        <p className="eyebrow">SPEAKING SESSION</p>
+        <h2>今日口语完成</h2>
+        <div className="speaking-summary-stats"><span><b>{formatMinutes(totalSeconds)}</b>练习时长</span><span><b>{responses.length}</b>个问题</span></div>
+        <div className="speaking-summary-grid">
+          <div><small>主要问题</small><strong>{mainProblem}</strong></div>
+          <div><small>重复表达</small><strong>{repeatedThink ? `I think × ${repeatedThink}` : "—"}</strong></div>
+          <div><small>建议复用</small><strong>From my perspective</strong></div>
         </div>
-        {running ? (
-          <div className="timer-actions">
-            <button className="outline" onClick={p.pause}>
-              暂停
-            </button>
-            <button className="primary" onClick={p.finish}>
-              结束并保存
-            </button>
-          </div>
-        ) : (
-          <button className="primary large" onClick={() => p.start(p.task)}>
-            {p.seconds ? "继续训练" : "开始训练"}
-          </button>
-        )}
-        <textarea placeholder="在这里记录训练要点、错题或下一步。" />
+        <p>本次回答已保存为月底能力测评的参考证据，不会更新日常 Speaking 分数。</p>
+      </section>
+    );
+  }
+
+  return (
+    <section className="speaking-page">
+      <div className="speaking-heading">
+        <p className="eyebrow">SPEAKING PRACTICE</p>
+        <span>今日主题 · {theme.primaryTheme}</span>
+      </div>
+      <div className="speaking-parts" aria-label="IELTS 口语阶段">
+        {partLabels.map((label, index) => {
+          const part = (index + 1) as 1 | 2 | 3;
+          const progress = getSpeakingPart(session, part);
+          return <button key={label} className={session.activePart === part ? "active" : progress.status === "completed" ? "done" : ""} onClick={() => { p.setSession({ ...session, activePart: part }); setFallbackOpen(false); setNotice(""); }}>{label}</button>;
+        })}
+      </div>
+      <article className="speaking-question-card">
+        <p className="eyebrow">{session.activePart === 1 ? "PART 1 · PERSONAL QUESTIONS" : session.activePart === 2 ? "PART 2 · CUE CARD" : "PART 3 · DISCUSSION"}</p>
+        {session.activePart === 2 ? (
+          <>
+            <h2>{session.cueCard.prompt}</h2>
+            <p>You should say:</p>
+            <ul>{session.cueCard.points.map((point) => <li key={point}>{point}</li>)}</ul>
+          </>
+        ) : <h2>{currentQuestion}</h2>}
+        {activeProgress.status === "preparing" ? <div className="speaking-preparation"><span>Preparation · {String(preparationSeconds).padStart(2, "0")} sec</span><button className="primary" onClick={() => p.setSession(withSpeakingPart(session, session.activePart, { ...activeProgress, status: "ready", preparationEndsAt: undefined }))}>开始回答</button></div> : null}
       </article>
-    </div>
+      {activeProgress.status === "completed" ? <p className="speaking-processing">本部分已完成；其他 Part 仍可自由切换。</p> : activeProgress.status === "recording" ? (
+        <div className="speaking-voice-actions"><p>● 正在录音 · {clock(recordingSeconds)}</p><button className="outline" onClick={stopVoice}>■ 结束回答</button></div>
+      ) : activeProgress.status === "processing" ? <p className="speaking-processing">Processing...</p> : (
+        <div className="speaking-voice-actions">
+          <button className="primary" onClick={beginVoice} disabled={activeProgress.status === "preparing"}>● 开始回答</button>
+          {fallbackOpen ? <button className="text-link" onClick={() => { setRecordingStartedAt(Date.now()); setFallbackOpen(true); }}>输入回答</button> : null}
+        </div>
+      )}
+      {fallbackOpen && activeProgress.status !== "recording" && activeProgress.status !== "processing" && activeProgress.status !== "completed" ? <form className="speaking-fallback" onSubmit={(event) => { event.preventDefault(); submitAnswer(fallbackAnswer); }}><label>输入回答（语音不可用时的降级方式）<input autoFocus value={fallbackAnswer} onChange={(event) => setFallbackAnswer(event.target.value)} placeholder="输入你的回答" /></label><button className="outline" disabled={!fallbackAnswer.trim()}>提交回答</button></form> : null}
+      {notice ? <p className="speaking-notice">{notice}</p> : null}
+    </section>
   );
 }
-function Words(p: {
+function RetiredWords(p: {
   all: Word[];
   setAll: (x: Word[]) => void;
   item: Word;
@@ -3140,6 +3766,10 @@ function Words(p: {
           prompt: `Correct this: ${wrongForm}`,
           answer: correctForm,
           context: `${type || "Vocabulary mistake"} · ${candidate?.context || "Personal error record"}`,
+          sourceWordId: entityKey,
+          sourceDefinition: wrongForm,
+          sourceExample: candidate?.context || "",
+          debugSource: { sourceId: entry.id, sourceType: "vocabulary-mistake" },
           difficultyLevel: 2,
           masteryStage: 1,
         }),
@@ -3484,6 +4114,47 @@ function Words(p: {
   );
 }
 
+const vocabularyPathCss = `
+.vocabulary-path{max-width:1000px;margin:0 auto;padding:32px 0 64px}.vocabulary-head{display:flex;align-items:start;justify-content:space-between;gap:16px;border-bottom:1px solid var(--line);padding-bottom:20px}.vocabulary-head h2{margin:7px 0 0;font-size:27px;letter-spacing:-.8px}.vocabulary-curriculum{margin-top:16px;display:flex;justify-content:space-between;gap:14px;align-items:start}.vocabulary-curriculum strong{display:block;font-size:12px}.vocabulary-curriculum small{display:block;margin-top:5px;color:#777;font-size:10px;line-height:1.55;max-width:650px}.vocabulary-upload{white-space:nowrap;cursor:pointer}.vocabulary-upload input{display:none}.vocabulary-plan{display:grid;grid-template-columns:1fr auto;align-items:end;gap:18px;padding:23px 0;border-bottom:1px solid var(--line)}.vocabulary-plan h3{font-size:20px;margin:5px 0}.vocabulary-plan strong{font-size:38px;letter-spacing:-2px}.vocabulary-plan span{display:block;margin-top:5px;font-size:11px;color:#777}.vocabulary-plan .primary{white-space:nowrap}.vocabulary-main{display:grid;grid-template-columns:minmax(0,1fr) 245px;gap:38px;padding-top:25px}.vocabulary-card{min-height:340px;border:1px solid var(--line);border-radius:8px;padding:25px;display:flex;flex-direction:column}.vocabulary-card h2{font:31px Georgia,serif;margin:28px 0 8px}.vocabulary-card>p{font-size:13px;line-height:1.65;color:#555;margin:0}.vocabulary-card .recall-actions{margin-top:auto;display:flex;gap:8px}.vocabulary-card .recall-actions button{flex:1}.vocabulary-answer{border-top:1px solid var(--line);margin-top:19px;padding-top:15px;display:grid;gap:12px}.vocabulary-answer label{font-size:10px;color:#777}.vocabulary-answer p{font-size:13px;line-height:1.6;margin:4px 0 0}.vocabulary-rate{display:flex;gap:7px;margin-top:auto}.vocabulary-rate button{flex:1}.vocabulary-queue{border-left:1px solid var(--line);padding-left:23px}.vocabulary-queue h3{font-size:16px;margin:7px 0 14px}.vocabulary-queue>p:not(.eyebrow){font-size:11px;color:#777;line-height:1.6}.vocabulary-queue-list{border-top:1px solid var(--line);margin-top:14px}.vocabulary-queue-list div{display:flex;justify-content:space-between;gap:8px;border-bottom:1px solid var(--line);padding:10px 0;font-size:11px}.vocabulary-queue-list small{color:#888}.vocabulary-inbox{margin-top:18px;border-top:1px solid var(--line);padding-top:14px;font-size:11px;color:#666}.vocabulary-inbox button{border:0;background:none;padding:0;color:#666;font-size:11px;cursor:pointer}.vocabulary-complete{padding:48px 0}.vocabulary-complete h3{font-size:28px;margin:7px 0}.vocabulary-complete p{font-size:12px;color:#777}@media(max-width:720px){.vocabulary-head,.vocabulary-curriculum,.vocabulary-plan{display:grid}.vocabulary-main{grid-template-columns:1fr}.vocabulary-queue{border-left:0;border-top:1px solid var(--line);padding:22px 0 0}.vocabulary-plan .primary{justify-self:start}}`;
+
+function Words(p: {
+  all: Word[]; setAll: (x: Word[]) => void; item: Word; reveal: boolean; setReveal: (x: boolean) => void;
+  rate: (mode: string, dimension?: VocabularyDimension, targetWord?: string) => void;
+  date: string; curriculum: VocabularyCurriculum | null; setCurriculum: (x: VocabularyCurriculum | null) => void;
+  curriculumProgress: VocabularyCurriculumProgress | null; setCurriculumProgress: (x: VocabularyCurriculumProgress | null) => void;
+  plan: DailyVocabularyPlan | null; setPlan: (x: DailyVocabularyPlan | null) => void;
+  mastery: Record<string, VocabularyMastery>; task: Task | undefined; active: ActiveStudy | null; seconds: number;
+  start: (x: Task) => void; pause: () => void; resume: () => void; finish: () => void;
+  theme: DailyTheme; highlights: ReadingHighlight[]; listeningReviews: ListeningReview[]; materials: WritingMaterial[];
+  reviewItems: ReviewItem[]; setReviewItems: (x: ReviewItem[]) => void;
+}) {
+  const [started, setStarted] = useState(false), [queueIndex, setQueueIndex] = useState(0), [inboxOpen, setInboxOpen] = useState(false), [uploadMessage, setUploadMessage] = useState("");
+  const autoInbox = useMemo(() => dedupeInbox([
+    ...p.highlights.filter((item) => item.type === "word" || item.type === "phrase").map((item) => ({ id: `reading-${item.id}`, type: item.type === "word" ? "word" as const : "phrase" as const, content: item.text, sourceModule: "reading" as const, sourceId: item.id, context: item.context, topic: p.theme.topic, createdAt: item.createdAt, status: "pending" as const, priority: item.type === "word" ? "high" as const : "normal" as const })),
+    ...p.listeningReviews.filter((item) => !item.correct).map((item) => ({ id: `listening-${item.id}`, type: "mistake" as const, content: item.text, sourceModule: "listening" as const, sourceId: item.id, context: item.userAnswer, topic: p.theme.topic, createdAt: item.lastReviewedAt, status: "pending" as const, priority: "high" as const, correctForm: item.text, mistakeType: item.mistakeType || "听力识别" })),
+    ...p.materials.filter((item) => ["vocabulary", "phrase", "sentence_pattern"].includes(item.type)).map((item) => ({ id: `writing-${item.id}`, type: item.type === "vocabulary" ? "word" as const : "phrase" as const, content: item.content, sourceModule: "writing" as const, sourceId: item.id, context: item.example, topic: item.topic, createdAt: item.createdAt || p.date, status: "pending" as const, priority: "normal" as const })),
+    ...p.reviewItems.filter((item) => item.sourceModule === "speaking").map((item) => ({ id: `speaking-${item.id}`, type: "suggestion" as const, content: item.answer, sourceModule: "speaking" as const, sourceId: item.sourceId, context: item.context, topic: p.theme.topic, createdAt: item.createdAt, status: "pending" as const, priority: "normal" as const })),
+  ]), [p.highlights, p.listeningReviews, p.materials, p.reviewItems, p.theme.topic, p.date]);
+  const generatedPlan = useMemo(() => generateDailyVocabularyPlan({ date: p.date || "vocabulary-initial", words: p.all, curriculum: p.curriculum, progress: p.curriculumProgress }), [p.date, p.all, p.curriculum, p.curriculumProgress]);
+  const plan = p.plan?.date === p.date ? p.plan : generatedPlan;
+  useEffect(() => { if (p.date && (!p.plan || p.plan.date !== p.date)) p.setPlan(generatedPlan); }, [p.date, p.plan, generatedPlan, p.setPlan]);
+  const queueNames = [...plan.reviewWords, ...plan.personalWords, ...plan.curriculumNewWords];
+  const queue = queueNames.map((name) => p.all.find((word) => normalizeVocabulary(word.word) === normalizeVocabulary(name))).filter((word): word is Word => !!word);
+  const current = queue[queueIndex] || p.item;
+  const dimension = current ? (Object.keys(p.mastery[normalizeVocabulary(current.word)] || emptyMastery()) as VocabularyDimension[]).sort((a, b) => (p.mastery[normalizeVocabulary(current.word)] || emptyMastery())[a] - (p.mastery[normalizeVocabulary(current.word)] || emptyMastery())[b])[0] : "meaningRecognition";
+  const exercise = current ? promptForDimension(dimension, current) : null;
+  const advance = (result: "again" | "good" | "easy") => { if (!current) return; p.rate(result, dimension, current.word); p.setReveal(false); setQueueIndex((index) => index + 1); };
+  const upload = async (file?: File) => { if (!file) return; setUploadMessage("正在解析教材结构…"); try { const curriculum = await parseVocabularyCurriculumUpload(file); const first = curriculum.sections[0]; p.setCurriculum(curriculum); p.setCurriculumProgress({ curriculumId: curriculum.id, currentUnit: first?.title, currentSection: first?.id, currentPage: first?.startPage, completedSections: [] }); setUploadMessage(curriculum.parserNote || "教材已解析。"); } catch { setUploadMessage("无法可靠解析这份教材；请尝试文字可复制的 PDF、TXT 或 DOCX。 "); } };
+  const section = currentVocabularySection(p.curriculum, p.curriculumProgress);
+  const weak = current ? dimensionLabel[dimension] : "—";
+  return <section className="vocabulary-path"><style>{vocabularyPathCss}</style>
+    <header className="vocabulary-head"><div><p className="eyebrow">VOCABULARY TRAINING</p><h2>词汇训练</h2></div><button className="inbox-button" onClick={() => setInboxOpen((value) => !value)}>收集箱 · {autoInbox.length}</button></header>
+    <div className="vocabulary-curriculum"><div><strong>{p.curriculum ? `${p.curriculum.title}${section ? ` · ${section.title}` : ""}` : "尚未上传词汇教材"}</strong><small>{uploadMessage || p.curriculum?.parserNote || "上传 Vocabulary in Use 或雅思词汇教材后，系统会记录当前章节；没有教材时仍会安排已有词库与个人词汇。"}</small></div><label className="outline vocabulary-upload">{p.curriculum ? "更换教材" : "上传教材"}<input type="file" accept=".pdf,.txt,.doc,.docx" onChange={(event) => upload(event.target.files?.[0])} /></label></div>
+    <section className="vocabulary-plan"><div><p className="eyebrow">今日词汇</p><h3>{plan.total}</h3><span>教材新词 {plan.curriculumNewWords.length} · 到期复习 {plan.reviewWords.length} · 个人词汇 {plan.personalWords.length}</span></div>{!started && <button className="primary" onClick={() => { setStarted(true); p.setReveal(false); }}>开始今日词汇</button>}</section>
+    {started && current ? <div className="vocabulary-main"><main><article className="vocabulary-card"><p className="eyebrow">{dimensionLabel[dimension]} · 第 {Math.max(1, (p.mastery[normalizeVocabulary(current.word)]?.meaningRecognition || 0) + 1)} 轮</p><h2>{current.word}</h2>{!p.reveal ? <><p>{exercise?.prompt}</p><div className="recall-actions"><button className="outline" onClick={() => advance("again")}>想不起来</button><button className="primary" onClick={() => p.setReveal(true)}>我知道</button></div></> : <><div className="vocabulary-answer"><div><label>中文意思</label><p>{current.zh}</p></div><div><label>常用搭配</label><p>{current.collocation}</p></div><div><label>例句</label><p>{current.example}</p></div>{current.error && <div><label>易错点</label><p>{current.error}</p></div>}</div><div className="vocabulary-rate"><button className="outline" onClick={() => advance("again")}>忘记了</button><button className="outline" onClick={() => advance("good")}>记得</button><button className="primary" onClick={() => advance("easy")}>很轻松</button></div></>}</article></main><aside className="vocabulary-queue"><p className="eyebrow">今日队列</p><h3>{plan.total} 个词</h3><p>当前优先训练：{weak}</p><div className="vocabulary-queue-list">{queue.slice(0, 9).map((word) => <div key={word.word}><b>{word.word}</b><small>{word.due}</small></div>)}</div>{inboxOpen && <div className="vocabulary-inbox"><p>自动收集：{autoInbox.reduce((map, item) => ({ ...map, [item.sourceModule]: (map[item.sourceModule] || 0) + 1 }), {} as Record<string, number>) && Object.entries(autoInbox.reduce((map, item) => ({ ...map, [item.sourceModule]: (map[item.sourceModule] || 0) + 1 }), {} as Record<string, number>)).map(([source, count]) => `${source} ${count}`).join(" · ")}</p><p>候选词会去重并保留来源，进入后续词汇计划。</p></div>}</aside></div> : started ? <div className="vocabulary-complete"><p className="eyebrow">今日词汇完成</p><h3>已完成当前队列</h3><p>薄弱项将继续影响下一次复习的训练方式。</p></div> : null}
+  </section>;
+}
+
 function Reading(p: {
   articles: ReadingArticle[];
   setArticles: (x: ReadingArticle[]) => void;
@@ -3510,41 +4181,62 @@ function Reading(p: {
     p.setArticles(p.articles.map((item) => (item.id === article.id ? article : item)));
     setSelected(article);
   };
-  const analyseAndAdd = async (images: { name: string; dataUrl: string }[]) => {
-    const date = localDate();
-    const analysis = await analyseReadingImages(images.map((image) => image.name));
-    const article: ReadingArticle = {
-      id: `reading-${Date.now()}`,
+  const articleFromAnalysis = (
+    id: string,
+    date: string,
+    images: ReadingImageUpload[],
+    outcome: ReadingAnalysisOutcome,
+    suspiciousDuplicate = false,
+  ): ReadingArticle => {
+    const source = {
+      id,
       createdAt: date,
       completedAt: date,
-      status: "completed",
-      source: "User Imported",
-      topic: analysis.mainTopic as ReadingTopic,
-      content: analysis.sourceText,
+      source: "User Imported" as const,
       imageUrls: images.map((image) => image.dataUrl),
       imageNames: images.map((image) => image.name),
-      title: analysis.title,
-      mainTopic: analysis.mainTopic,
-      subTopics: analysis.subTopics,
-      summary: analysis.summary,
-      concepts: analysis.concepts,
-      vocabulary: analysis.vocabulary,
-      usefulExpressions: analysis.usefulExpressions,
-      arguments: analysis.arguments,
-      difficulty: analysis.difficulty,
-      sourceText: analysis.sourceText,
-      aiStatus: "completed",
-      failedImageIndexes: analysis.failedImageIndexes,
+      imageFileIds: images.map((image) => image.id),
+      imageHashes: outcome.imageHashes,
+      contentHash: outcome.contentHash,
+      analysisVersion: outcome.analysisVersion,
+      analysedAt: new Date().toISOString(),
+      sourceText: outcome.sourceText,
+      sourceTextLength: outcome.status === "completed" ? outcome.sourceTextLength : outcome.sourceText.length,
+      analysisProvider: outcome.status === "completed" ? outcome.analysisProvider : undefined,
+      analysisModel: outcome.status === "completed" ? outcome.analysisModel : undefined,
+      failedImageIndexes: outcome.failedImageIndexes,
+      suspiciousDuplicate,
     };
-    const nextArticles = [article, ...p.articles];
-    p.setArticles(nextArticles);
-    const themeContext = buildThemeContext(nextArticles, date);
-    localStorage.setItem(`ielts-theme-context-${date}`, JSON.stringify(themeContext));
-    p.setTheme({
-      date,
-      topic: themeContext.primaryTheme,
-      subtopic: themeContext.secondaryThemes.join(" · ") || "Reading input",
-    });
+    if (outcome.status === "failed" || suspiciousDuplicate) {
+      return {
+        ...source,
+        status: "failed",
+        topic: "Other",
+        content: outcome.sourceText,
+        title: "分析失败",
+        aiStatus: "failed",
+        analysisFailureCode: outcome.status === "failed" ? outcome.code : undefined,
+        analysisFailureReason: suspiciousDuplicate ? "检测到与另一篇不同图片文章的分析完全重复" : outcome.status === "failed" ? outcome.reason : "分析结果异常",
+      };
+    }
+    return {
+      ...source,
+      status: "completed",
+      topic: outcome.mainTopic as ReadingTopic,
+      content: outcome.sourceText,
+      title: outcome.title,
+      mainTopic: outcome.mainTopic,
+      subTopics: [...outcome.subTopics],
+      summary: outcome.summary,
+      concepts: [...outcome.concepts],
+      vocabulary: [...outcome.vocabulary],
+      usefulExpressions: [...outcome.usefulExpressions],
+      arguments: [...outcome.arguments],
+      difficulty: outcome.difficulty,
+      aiStatus: "completed",
+    };
+  };
+  const addDerivedLearning = (article: ReadingArticle, analysis: Extract<ReadingAnalysisOutcome, { status: "completed" }>) => {
     const generatedCards = [...analysis.vocabulary, ...analysis.usefulExpressions].map(
       (content, index) => ({
         id: `reading-ai-${article.id}-${index}`,
@@ -3553,31 +4245,67 @@ function Reading(p: {
         content: `Recall: ${content}`,
         answer: content,
         context: analysis.summary,
-        createdAt: date,
-        nextReviewAt: date,
+        createdAt: article.createdAt,
+        nextReviewAt: article.createdAt,
         reviewCount: 0,
         difficulty: "good" as const,
       }),
     );
-    p.setCards([...p.cards, ...generatedCards]);
+    p.setCards([...p.cards.filter((card) => card.articleId !== article.id), ...generatedCards]);
     p.setMaterials([
-      ...p.materials,
+      ...p.materials.filter((material) => material.sourceArticleId !== article.id),
       ...analysis.usefulExpressions.map((content, index) => ({
         id: `reading-material-${article.id}-${index}`,
         type: "phrase" as const,
         content,
-        meaning: "Imported from today’s reading analysis",
+        meaning: "Imported from this reading analysis",
         topic: article.topic,
         source: "Reading analysis",
         sourceArticleId: article.id,
         example: analysis.summary,
-        createdAt: date,
-        nextReviewAt: date,
+        createdAt: article.createdAt,
+        nextReviewAt: article.createdAt,
         masteryLevel: 1,
         reviewCount: 0,
       })),
     ]);
+  };
+  const analyseAndAdd = async (images: ReadingImageUpload[]) => {
+    const date = localDate();
+    const id = `reading-${crypto.randomUUID?.() ?? Date.now()}`;
+    const analysis = await analyseReadingImages({ articleId: id, images });
+    const suspiciousDuplicate = analysis.status === "completed" && isSuspiciousDuplicate(analysis, p.articles);
+    if (suspiciousDuplicate) console.warn("[Reading analysis] suspicious duplicate", { articleId: id, contentHash: analysis.contentHash });
+    const article = articleFromAnalysis(id, date, images, analysis, suspiciousDuplicate);
+    const nextArticles = [article, ...p.articles];
+    p.setArticles(nextArticles);
+    if (analysis.status === "completed" && !suspiciousDuplicate) {
+      const themeContext = buildThemeContext(nextArticles, date);
+      localStorage.setItem(`ielts-theme-context-${date}`, JSON.stringify(themeContext));
+      p.setTheme({ date, topic: themeContext.primaryTheme, subtopic: themeContext.secondaryThemes.join(" · ") || "Reading input" });
+      addDerivedLearning(article, analysis);
+    }
     open(article);
+  };
+  const retryAnalysis = async () => {
+    if (!selected) return;
+    invalidateReadingAnalysisCache(selected.id, selected.contentHash);
+    const images = (selected.imageUrls ?? []).map((dataUrl, index) => ({
+      id: selected.imageFileIds?.[index] || `${selected.id}-${index}`,
+      name: selected.imageNames?.[index] || `article-image-${index + 1}`,
+      dataUrl,
+    }));
+    const analysis = await analyseReadingImages({ articleId: selected.id, images, force: true });
+    const suspiciousDuplicate = analysis.status === "completed" && isSuspiciousDuplicate(analysis, p.articles.filter((article) => article.id !== selected.id));
+    const updated = articleFromAnalysis(selected.id, selected.createdAt, images, analysis, suspiciousDuplicate);
+    updateSelected(updated);
+    if (analysis.status === "completed" && !suspiciousDuplicate) {
+      const nextArticles = p.articles.map((article) => article.id === updated.id ? updated : article);
+      const themeContext = buildThemeContext(nextArticles, selected.createdAt);
+      localStorage.setItem(`ielts-theme-context-${selected.createdAt}`, JSON.stringify(themeContext));
+      p.setTheme({ date: selected.createdAt, topic: themeContext.primaryTheme, subtopic: themeContext.secondaryThemes.join(" · ") || "Reading input" });
+      addDerivedLearning(updated, analysis);
+    }
   };
   const finishSession = () => {
     if (!selected || !p.seconds) {
@@ -3617,13 +4345,7 @@ function Reading(p: {
         start={() => p.start(p.task, selected.id)}
         pause={p.pause}
         finish={finishSession}
-        retry={() =>
-          updateSelected({
-            ...selected,
-            aiStatus: "completed",
-            failedImageIndexes: [],
-          })
-        }
+        retry={() => void retryAnalysis()}
         back={() => setScreen("library")}
       />
     );
@@ -3662,14 +4384,14 @@ function Reading(p: {
           {p.articles.map((article) => (
             <button className="article-card article-card-new" key={article.id} onClick={() => open(article)}>
               <div>
-                <span>{article.mainTopic || article.topic}</span>
+                <span>{article.aiStatus === "completed" ? article.mainTopic || article.topic : "等待分析"}</span>
                 <small>{article.createdAt.slice(5).replace("-", "/")}</small>
               </div>
-              <h3>{article.title || "Untitled reading"}</h3>
-              <p>{article.subTopics?.slice(0, 2).join(" · ") || "Analysing topic"}</p>
+              <h3>{article.aiStatus === "completed" ? article.title || "Untitled reading" : "分析失败"}</h3>
+              <p>{article.aiStatus === "completed" ? article.subTopics?.slice(0, 2).join(" · ") || "等待分析" : article.analysisFailureReason || "分析失败 · 请重试"}</p>
               <footer>
                 <span>{article.imageUrls?.length ?? 0} images</span>
-                <b>{article.aiStatus === "failed" ? "Analysis needs retry" : "AI analysed"}</b>
+                <b>{article.aiStatus === "completed" ? "分析完成" : "分析失败 · Retry"}</b>
                 <i>→</i>
               </footer>
             </button>
@@ -4150,19 +4872,11 @@ function ArticleReader(p: {
           <h2>{p.article.title || "Untitled reading"}</h2>
           {p.article.summary && <p>{p.article.summary}</p>}
         </div>
-        <div className="reader-timer">
-          <small>READING</small>
-          <b>{clock(p.seconds)}</b>
-          {running ? (
-            <span><button className="outline" onClick={p.pause}>Pause</button><button className="primary" onClick={p.finish}>Finish</button></span>
-          ) : (
-            <button className="outline" onClick={p.start}>Start reading</button>
-          )}
-        </div>
+        <small className="training-timer-note">学习时间由右下角的全局计时器统一记录。</small>
       </div>
-      {failedCount > 0 && (
+      {(p.article.aiStatus === "failed" || failedCount > 0) && (
         <div className="analysis-warning">
-          {failedCount} image could not be fully analysed.
+          {p.article.analysisFailureReason || `${failedCount} image could not be fully analysed.`}
           <button onClick={p.retry}>Retry</button>
         </div>
       )}
@@ -4742,7 +5456,7 @@ function Listening(p: {
     setSession(next);
     p.setPersistedSession(next);
   };
-  const running = session?.status === "active" && p.active?.taskId === p.task.id && p.active.isRunning;
+  const running = session?.status === "active";
   const speak = (replay = false) => {
     if (!current || typeof window === "undefined") return;
     window.speechSynthesis.cancel();
@@ -4769,7 +5483,6 @@ function Listening(p: {
       currentReplays: 0,
     };
     updateSession(next);
-    p.start(p.task);
     setAnswer("");
     setChecked(null);
     setAnswerMode("english_text");
@@ -4865,7 +5578,6 @@ function Listening(p: {
         }
       }
       updateSession(completed);
-      p.finish();
     } else updateSession(nextSession);
     setAnswer("");
     setChecked(null);
@@ -4874,10 +5586,8 @@ function Listening(p: {
   const pauseOrResume = () => {
     if (!session) return;
     if (running) {
-      p.pause();
       updateSession({ ...session, status: "paused" });
     } else {
-      p.start(p.task);
       updateSession({ ...session, status: "active" });
     }
   };
@@ -4938,9 +5648,15 @@ function Listening(p: {
           <p className="eyebrow">LISTENING TRAINING</p>
           <h2>Today's Listening</h2>
         </div>
-        {session && session.status !== "complete" && (
-          <button className="outline" onClick={pauseOrResume}>{running ? "Pause" : "Resume"}</button>
-        )}
+        <div className="listen-head-actions">
+          <label className="outline curriculum-upload">
+            {p.curriculumBook ? "Replace curriculum" : "Upload curriculum"}
+            <input type="file" accept="application/pdf,text/plain,.pdf,.txt" onChange={(event) => { void uploadCurriculum(event.target.files?.[0]); event.currentTarget.value = ""; }} />
+          </label>
+          {session && session.status !== "complete" && (
+            <button className="outline" onClick={pauseOrResume}>{running ? "Pause" : "Resume"}</button>
+          )}
+        </div>
       </div>
       {!session || session.status === "complete" ? (
         <>
@@ -5330,7 +6046,7 @@ function SessionSummary(p: { session: ListeningSession }) {
 
 const writingCss =
   ".writing{padding-top:34px;max-width:1120px;margin:auto}.writing-head{display:flex;justify-content:space-between;align-items:end}.writing-head h2{font-size:22px;margin:6px 0}.writing-counts{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin:22px 0}.writing-counts article,.writing-card,.topic-card,.writing-panel,.argument-card{background:#fff;border:1px solid #e8e8e5;border-radius:9px;padding:15px}.writing-counts b{display:block;font-size:14px}.writing-counts small{font-size:10px;color:#888;display:block;margin-top:5px}.writing-grid{display:grid;grid-template-columns:minmax(0,1.45fr) 285px;gap:34px}.topic-head{display:flex;justify-content:space-between;align-items:end;margin:34px 0 12px}.topic-head h3{font-size:18px;margin:6px 0}.topic-library{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}.topic-card{min-height:115px;text-align:left}.topic-card strong{font-size:13px}.topic-card span{display:block;font-size:10px;color:#888;margin-top:10px;line-height:1.5}.writing-card h3{font:20px Georgia,serif;line-height:1.5;margin:17px 0}.writing-card input,.material-form input,.material-form textarea,.argument-form input,.argument-form textarea{border:1px solid #e8e8e5;border-radius:5px;padding:9px;width:100%;font-size:12px}.writing-card .answer{display:flex;gap:8px}.writing-check{margin-top:14px;padding-top:14px;border-top:1px solid #e8e8e5;font-size:12px}.writing-rates{display:flex;gap:6px;margin-top:10px}.writing-rates button,.builder-parts button{border:1px solid #ddd;background:#fff;border-radius:5px;padding:7px 9px;font-size:10px}.material-form,.argument-form{display:grid;gap:9px}.material-form select,.argument-form select{border:1px solid #e8e8e5;border-radius:5px;padding:8px;font-size:11px;background:#fff}.material-form textarea,.argument-form textarea{min-height:70px;resize:vertical}.writing-side{border-left:1px solid #e8e8e5;padding-left:22px}.writing-side h3{font-size:16px;margin:7px 0 12px}.writing-side p:not(.eyebrow){font-size:11px;line-height:1.6;color:#777}.material-list{border-top:1px solid #e8e8e5}.material-list article{border-bottom:1px solid #e8e8e5;padding:10px 0}.material-list b{font-size:12px}.material-list span{font-size:10px;color:#888;display:block;margin-top:4px}.builder-parts{display:flex;flex-wrap:wrap;gap:6px;margin:14px 0}.builder-parts button{font-size:11px}.builder-result{font:15px/1.6 Georgia,serif;border-top:1px solid #e8e8e5;padding-top:15px}.argument-card{margin-top:9px}.argument-card strong{font-size:13px}.argument-card p{font-size:11px;line-height:1.55;color:#666;margin:5px 0}.paragraph-order{display:grid;gap:7px;margin:13px 0}.paragraph-order article{display:flex;gap:10px;border:1px solid #e8e8e5;border-radius:6px;padding:9px;font-size:11px}.paragraph-order button{border:0;background:none;color:#777}.writing-timer{display:flex;justify-content:space-between;background:#f2f2ef;border-radius:8px;padding:11px 13px;margin-bottom:14px;font-size:11px}.writing-timer b{font-size:15px}@media(max-width:850px){.writing-grid{grid-template-columns:1fr}.writing-side{border-left:0;border-top:1px solid #e8e8e5;padding:20px 0 0}.writing-counts{grid-template-columns:repeat(3,1fr)}}@media(max-width:600px){.topic-library{grid-template-columns:1fr 1fr}.writing-counts{grid-template-columns:1fr 1fr}.writing-head{align-items:start;gap:12px}.writing-card .answer{display:grid}}";
-function Writing(p: {
+function RetiredWriting(p: {
   materials: WritingMaterial[];
   setMaterials: (x: WritingMaterial[]) => void;
   argumentsCards: ArgumentCard[];
@@ -5470,28 +6186,7 @@ function Writing(p: {
           <p className="eyebrow">WRITING TRAINING</p>
           <h2>Build language you can actually use.</h2>
         </div>
-        {running ? (
-          <div>
-            <b>{clock(p.seconds)}</b>{" "}
-            <button className="outline" onClick={p.pause}>
-              Pause
-            </button>{" "}
-            <button className="primary" onClick={p.finish}>
-              Finish
-            </button>
-          </div>
-        ) : (
-          <button className="primary" onClick={() => p.start(p.task)}>
-            START WRITING
-          </button>
-        )}
       </div>
-      {running && (
-        <div className="writing-timer">
-          <span>Writing StudySession is running</span>
-          <b>{clock(p.seconds)}</b>
-        </div>
-      )}
       <div className="writing-counts">
         <article>
           <b>Phrase Recall</b>
@@ -5788,4 +6483,153 @@ function Writing(p: {
       </div>
     </section>
   );
+}
+
+const writingPathCss = `
+.writing-path{max-width:1040px;margin:0 auto;padding:32px 0 64px}.writing-path-header{padding-bottom:20px;border-bottom:1px solid var(--line)}.writing-path-header h2{font-size:27px;letter-spacing:-.8px;margin:6px 0 11px}.writing-path-meta{display:flex;flex-wrap:wrap;gap:8px;color:#666;font-size:11px}.writing-path-meta span{border:1px solid var(--line);border-radius:999px;padding:5px 9px}.writing-stages{display:flex;gap:22px;border-bottom:1px solid var(--line);margin:0 0 25px;overflow-x:auto}.writing-stages button{position:relative;flex:0 0 auto;border:0;background:none;padding:17px 0 14px;color:#999;font-size:13px;cursor:pointer}.writing-stages button.active{color:#171717;font-weight:700}.writing-stages button.active:after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:2px;background:#171717}.writing-workspace{display:grid;grid-template-columns:minmax(0,1fr) 260px;gap:38px}.writing-question{border-bottom:1px solid var(--line);padding:0 0 23px}.writing-question h3{font:23px/1.55 Georgia,serif;margin:9px 0 0;max-width:710px}.writing-exercise{padding:24px 0}.writing-exercise h3{font-size:17px;margin:7px 0}.writing-exercise>p:not(.eyebrow){font-size:12px;line-height:1.7;color:#666;margin:0 0 16px}.writing-exercise textarea{display:block;width:100%;min-height:166px;border:1px solid var(--line);border-radius:5px;padding:13px;resize:vertical;background:#fff;font:14px/1.65 Georgia,serif}.writing-exercise.essay textarea{min-height:310px}.writing-stage-hints{display:flex;flex-wrap:wrap;gap:7px;margin:0 0 13px}.writing-stage-hints span{border-left:2px solid #171717;padding:3px 0 3px 8px;font-size:11px;color:#666}.writing-submit{margin-top:12px}.writing-feedback{border-top:1px solid var(--line);padding-top:15px;margin-top:18px;font-size:12px}.writing-feedback p{margin:0 0 8px}.writing-feedback ul{margin:0;padding-left:18px;color:#555;display:grid;gap:5px}.writing-assets{border-left:1px solid var(--line);padding-left:23px}.writing-assets h3{font-size:16px;margin:7px 0 17px}.writing-assets section{border-top:1px solid var(--line);padding:13px 0}.writing-assets h4{font-size:11px;margin:0 0 8px}.writing-assets ul{margin:0;padding-left:15px;display:grid;gap:7px;color:#666;font-size:11px;line-height:1.5}.writing-assets p{font-size:11px;color:#777;line-height:1.55;margin:0}.writing-curriculum{display:flex;justify-content:space-between;align-items:start;gap:12px;border-bottom:1px solid var(--line);padding:0 0 15px;margin:0 0 3px}.writing-curriculum strong{display:block;font-size:12px}.writing-curriculum small{display:block;font-size:10px;line-height:1.55;color:#777;max-width:670px;margin-top:5px}.writing-upload{white-space:nowrap;cursor:pointer}.writing-upload input{display:none}@media(max-width:780px){.writing-workspace{grid-template-columns:1fr}.writing-assets{border-left:0;border-top:1px solid var(--line);padding:22px 0 0}.writing-curriculum{display:grid}.writing-stages{gap:17px}.writing-question h3{font-size:20px}}`;
+
+function Writing(p: {
+  date: string;
+  fallbackTheme: DailyTheme;
+  materials: WritingMaterial[];
+  setMaterials: (x: WritingMaterial[]) => void;
+  argumentsCards: ArgumentCard[];
+  setArgumentsCards: (x: ArgumentCard[]) => void;
+  words: Word[];
+  curriculum: WritingCurriculum | null;
+  setCurriculum: (x: WritingCurriculum | null) => void;
+  curriculumProgress: WritingCurriculumProgress | null;
+  setCurriculumProgress: (x: WritingCurriculumProgress | null) => void;
+  plan: DailyWritingPlan | null;
+  setPlan: (x: DailyWritingPlan | null) => void;
+  session: WritingSession | null;
+  setSession: (x: WritingSession | null) => void;
+  reviewItems: ReviewItem[];
+  setReviewItems: (x: ReviewItem[]) => void;
+  task: Task;
+  active: ActiveStudy | null;
+  seconds: number;
+  start: (x: Task) => void;
+  pause: () => void;
+  finish: () => void;
+}) {
+  const [themeContext, setThemeContext] = useState<ThemeContext | null>(null);
+  const [uploadMessage, setUploadMessage] = useState("");
+  useEffect(() => {
+    if (!p.date) return;
+    setThemeContext(load<ThemeContext | null>(`ielts-theme-context-${p.date}`, null));
+  }, [p.date]);
+  const generatedPlan = useMemo(() => generateDailyWritingPlan({
+    date: p.date || "writing-initial",
+    themeContext,
+    fallbackTheme: p.fallbackTheme.topic,
+    curriculum: p.curriculum,
+    progress: p.curriculumProgress,
+    words: p.words.map((word) => word.word),
+    historicalExpressions: p.materials.filter((item) => item.type === "phrase" || item.type === "sentence_pattern").map((item) => item.content),
+  }), [p.date, themeContext, p.fallbackTheme.topic, p.curriculum, p.curriculumProgress, p.words, p.materials]);
+  const plan = p.plan?.date === p.date ? p.plan : generatedPlan;
+  useEffect(() => {
+    if (p.date && (!p.plan || p.plan.date !== p.date)) p.setPlan(generatedPlan);
+  }, [p.date, p.plan, generatedPlan, p.setPlan]);
+  useEffect(() => {
+    if (!p.date || !plan || (p.session?.date === p.date && p.session.question === plan.question)) return;
+    p.setSession({
+      id: `writing-session-${p.date}`,
+      date: p.date,
+      theme: plan.theme,
+      question: plan.question,
+      activeStage: plan.recommendedStage,
+      stages: {
+        ideas: { value: "" }, language: { value: "" }, sentences: { value: "" }, paragraph: { value: "" }, essay: { value: "" },
+      },
+    });
+  }, [p.date, plan, p.session, p.setSession]);
+  const session = p.session?.date === p.date ? p.session : null;
+  const activeStage = session?.activeStage || plan.recommendedStage;
+  const stageNames: Record<WritingStage, string> = { ideas: "观点", language: "词组", sentences: "句子", paragraph: "段落", essay: "全文" };
+  const instructions: Record<WritingStage, { title: string; detail: string; placeholder: string }> = {
+    ideas: { title: "观点训练", detail: "写出两个可以用于正文的核心观点；其中一个可以回应相反立场。", placeholder: "观点一：…\n理由：…\n\n观点二：…\n理由：…" },
+    language: { title: "词组训练", detail: "选择今天可调用的表达，写出它们如何服务于这道题。", placeholder: "表达：…\n我会用它来说明：…\n\n表达：…\n我会用它来说明：…" },
+    sentences: { title: "句子训练", detail: "把一个观点扩展成有逻辑连接的论证句。", placeholder: "观点：…\n论证句：…" },
+    paragraph: { title: "段落训练", detail: "围绕一个观点写出完整正文段落：观点、解释与例子。", placeholder: "主题句：…\n解释：…\n例子：…\n结果：…" },
+    essay: { title: "全文训练", detail: "完成一篇围绕今日题目的 IELTS Task 2 作文。", placeholder: "在这里完成全文…" },
+  };
+  const changeStage = (stage: WritingStage) => {
+    if (session) p.setSession({ ...session, activeStage: stage });
+  };
+  const changeValue = (value: string) => {
+    if (!session) return;
+    p.setSession({ ...session, stages: { ...session.stages, [activeStage]: { ...session.stages[activeStage], value } } });
+  };
+  const submitStage = () => {
+    if (!session) return;
+    const stageState = session.stages[activeStage];
+    const feedback = evaluateWritingStage(activeStage, stageState.value, plan.question);
+    p.setSession({ ...session, stages: { ...session.stages, [activeStage]: { ...stageState, feedback, submittedAt: new Date().toISOString(), completed: !feedback.issues.length } } });
+    const additions = feedback.issues.map((issue, index) => newReviewItem({
+      id: `writing-feedback-${session.id}-${activeStage}-${index}`,
+      parentEntityId: session.id,
+      sourceModule: "writing",
+      sourceId: session.id,
+      skill: issue.type === "logic" ? "logic" : "production",
+      reviewType: issue.type,
+      prompt: issue.content,
+      answer: issue.correction || issue.content,
+      context: plan.question,
+      difficultyLevel: 3,
+      masteryStage: 1,
+    }));
+    if (additions.length) p.setReviewItems([...p.reviewItems.filter((item) => !additions.some((addition) => addition.id === item.id)), ...additions]);
+    const current = currentWritingSection(p.curriculum, p.curriculumProgress);
+    if (!feedback.issues.length && current?.stage === activeStage && p.curriculum) {
+      const index = p.curriculum.sections.findIndex((section) => section.id === current.id);
+      const next = p.curriculum.sections[index + 1];
+      p.setCurriculumProgress({ curriculumId: p.curriculum.id, currentSectionId: next?.id || current.id, currentStage: next?.stage || current.stage, completedSectionIds: Array.from(new Set([...(p.curriculumProgress?.completedSectionIds || []), current.id])), lastStudiedAt: p.date });
+      p.setPlan({ ...plan, curriculumSectionId: next?.id || current.id, recommendedStage: next?.stage || current.stage });
+    }
+  };
+  const handleUpload = async (file?: File) => {
+    if (!file) return;
+    setUploadMessage("正在解析教材结构…");
+    try {
+      const curriculum = await parseWritingCurriculumUpload(file);
+      const first = curriculum.sections[0];
+      p.setCurriculum(curriculum);
+      p.setCurriculumProgress({ curriculumId: curriculum.id, currentSectionId: first?.id, currentStage: first?.stage || "ideas", completedSectionIds: [] });
+      p.setPlan({ ...plan, curriculumSectionId: first?.id, recommendedStage: first?.stage || "ideas" });
+      setUploadMessage(curriculum.parserNote || "教材已解析。");
+    } catch {
+      setUploadMessage("无法解析这份教材，请尝试可复制文本的 PDF、TXT 或 DOCX 文件。");
+    }
+  };
+  const stage = instructions[activeStage];
+  const currentSection = currentWritingSection(p.curriculum, p.curriculumProgress);
+  const assets = {
+    ideas: [...plan.ideas, ...p.argumentsCards.filter((card) => card.topic === plan.theme).map((card) => card.claim)].filter(Boolean).slice(0, 3),
+    expressions: [...plan.expressions, ...p.materials.filter((item) => item.topic === plan.theme).map((item) => item.content)].filter(Boolean).filter((item, index, all) => all.indexOf(item) === index).slice(0, 4),
+    migration: plan.readingMigration,
+  };
+  return <section className="writing-path">
+    <style>{writingPathCss}</style>
+    <header className="writing-path-header">
+      <p className="eyebrow">WRITING TRAINING</p><h2>写作训练</h2>
+      <div className="writing-path-meta"><span>{p.curriculum ? `SIMON · ${currentSection?.title || stage.title}` : `课程路径 · ${stage.title}`}</span><span>今日主题 · {plan.theme}</span></div>
+    </header>
+    <div className="writing-curriculum">
+      <div><strong>{p.curriculum ? p.curriculum.title : "还没有上传写作教材"}</strong><small>{uploadMessage || p.curriculum?.parserNote || "上传自己的 Simon 教材后，系统会只识别可靠的章节、方法和页码；没有教材时仍可按当前训练路径开始。"}</small></div>
+      <label className="outline writing-upload">{p.curriculum ? "更换教材" : "上传教材"}<input type="file" accept=".pdf,.txt,.doc,.docx" onChange={(event) => handleUpload(event.target.files?.[0])} /></label>
+    </div>
+    <nav className="writing-stages" aria-label="写作训练阶段">{(Object.keys(stageNames) as WritingStage[]).map((stageKey) => <button key={stageKey} className={activeStage === stageKey ? "active" : ""} onClick={() => changeStage(stageKey)}>{stageNames[stageKey]}</button>)}</nav>
+    <div className="writing-workspace"><main>
+      <section className="writing-question"><p className="eyebrow">今日题目</p><h3>{plan.question}</h3></section>
+      <section className={`writing-exercise ${activeStage === "essay" ? "essay" : ""}`}><p className="eyebrow">当前训练 · {stageNames[activeStage]}</p><h3>{stage.title}</h3><p>{stage.detail}</p>
+        {activeStage === "language" && <div className="writing-stage-hints">{assets.expressions.map((expression) => <span key={expression}>{expression}</span>)}</div>}
+        {activeStage === "ideas" && <div className="writing-stage-hints">{assets.ideas.slice(0, 2).map((idea) => <span key={idea}>{idea}</span>)}</div>}
+        <textarea value={session?.stages[activeStage].value || ""} onChange={(event) => changeValue(event.target.value)} placeholder={stage.placeholder} />
+        <button className="primary writing-submit" onClick={submitStage}>提交</button>
+        {session?.stages[activeStage].feedback && <div className="writing-feedback"><p><b>{session.stages[activeStage].feedback?.summary}</b></p>{session.stages[activeStage].feedback?.issues.length ? <ul>{session.stages[activeStage].feedback?.issues.map((issue, index) => <li key={index}>{issue.content}{issue.correction ? ` 建议：${issue.correction}` : ""}</li>)}</ul> : <p>这一阶段已记录；你可以继续当前训练，或按自己的节奏切换阶段。</p>}</div>}
+      </section>
+    </main><aside className="writing-assets"><p className="eyebrow">今日可调用</p><h3>围绕这道题的材料</h3><section><h4>观点</h4><ul>{assets.ideas.length ? assets.ideas.map((idea) => <li key={idea}>{idea}</li>) : <li>完成阅读后，这里会显示可迁移的观点。</li>}</ul></section><section><h4>表达</h4><ul>{assets.expressions.map((expression) => <li key={expression}>{expression}</li>)}</ul></section><section><h4>阅读迁移</h4><ul>{assets.migration.length ? assets.migration.map((item) => <li key={item}>{item}</li>) : <li>今天尚未读取到阅读主题；当前题目使用稳定的备用主题。</li>}</ul></section></aside></div>
+  </section>;
 }

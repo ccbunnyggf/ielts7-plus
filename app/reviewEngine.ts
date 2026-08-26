@@ -1,7 +1,7 @@
 import {createEmptyCard,fsrs,generatorParameters,Rating,type CardInput,type Grade} from 'ts-fsrs';
 
 export type ReviewRating='again'|'hard'|'good'|'easy';
-export type ReviewItem={id:string;parentEntityId:string;sourceModule:'reading'|'listening'|'speaking'|'writing'|'vocabulary';sourceId:string;skill:'recognition'|'recall'|'listening'|'speaking'|'writing'|'logic'|'production'|'transfer';reviewType:string;prompt:string;answer:string;context:string;difficultyLevel:number;masteryStage:number;fsrsCard:CardInput;createdAt:string;lastReviewedAt?:string;nextReviewAt:string;reviewCount:number;lapseCount:number;priority:number;isSuspended:boolean;buriedUntil?:string};
+export type ReviewItem={id:string;parentEntityId:string;sourceModule:'reading'|'listening'|'speaking'|'writing'|'vocabulary';sourceId:string;skill:'recognition'|'recall'|'listening'|'speaking'|'writing'|'logic'|'production'|'transfer';reviewType:string;prompt:string;answer:string;context:string;sourceWordId?:string;sourceDefinition?:string;sourceExample?:string;audioText?:string;audioUrl?:string;debugSource?:{sourceId:string;sourceType:string};difficultyLevel:number;masteryStage:number;fsrsCard:CardInput;createdAt:string;lastReviewedAt?:string;nextReviewAt:string;reviewCount:number;lapseCount:number;priority:number;isSuspended:boolean;buriedUntil?:string};
 export type ReviewLog={id:string;reviewItemId:string;timestamp:string;rating:ReviewRating;correct:boolean;userAnswer:string;responseTimeMs:number;mistakeType:string;previousStage:number;nextStage:number;fsrsLog:unknown};
 const scheduler=fsrs(generatorParameters({request_retention:.9,enable_fuzz:false,learning_steps:['10m','30m'],relearning_steps:['20m']}));
 const iso=(d:Date|string)=>new Date(d).toISOString();

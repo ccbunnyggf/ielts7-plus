@@ -89,6 +89,7 @@ export function getTodayStudy(sessions: StudySessionRecord[], date: string) {
 export function getYesterdayStudySeconds(sessions: StudySessionRecord[], date: string) {
   if (!date) return 0;
   const current = new Date(`${date}T12:00:00`);
+  if (Number.isNaN(current.getTime())) return 0;
   current.setDate(current.getDate() - 1);
   const yesterday = current.toISOString().slice(0, 10);
   return sessions

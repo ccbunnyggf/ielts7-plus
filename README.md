@@ -68,11 +68,7 @@ Use **Settings → Export Data** to download a JSON backup, and **Import Data** 
 
 ## AI features
 
-The core learning system does not need an API key. Future optional AI capabilities can be connected through environment variables. Copy `.env.example` to `.env.local` and provide your own key:
-
-```bash
-OPENAI_API_KEY=
-```
+The core learning system does not need an API key. Reading Vision uses the deployed Cloudflare Worker only: add `OPENAI_API_KEY` as a **Worker Secret** and optionally set the non-secret Worker variable `OPENAI_VISION_MODEL`. Do not put an API key in `.env.example`, browser code, GitHub, or a public static deployment.
 
 Never commit real keys or exported personal learning data.
 

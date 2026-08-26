@@ -26,6 +26,7 @@ export default defineConfig(async () => {
         viteEnvironment: { name: 'rsc', childEnvironments: ['ssr'] },
         config: {
           main: 'vinext/server/app-router-entry',
+          compatibility_date: '2026-08-26',
           compatibility_flags: ['nodejs_compat'],
         },
       }),
