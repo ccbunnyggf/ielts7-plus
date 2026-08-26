@@ -27,7 +27,9 @@ export default defineConfig(async () => {
         config: {
           main: 'vinext/server/app-router-entry',
           compatibility_date: '2026-08-26',
-          compatibility_flags: ['nodejs_compat'],
+          // Make Worker dashboard Secrets available to the server-only
+          // process.env boundary used by the Vision route.
+          compatibility_flags: ['nodejs_compat', 'nodejs_compat_populate_process_env'],
         },
       }),
     ],

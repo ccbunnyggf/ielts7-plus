@@ -85,9 +85,9 @@ const cleanList = (value: unknown, maximum: number) =>
 
 const failure = (code: VisionErrorCode, reason: string): VisionAnalysisFailure => ({ status: "failed", code, reason });
 
-// Cloudflare's nodejs_compat_populate_process_env flag maps Worker bindings to
-// process.env. Keeping the binding at this boundary makes all business logic
-// consume env.OPENAI_* and prevents a client import from ever seeing a secret.
+// Cloudflare's explicit nodejs_compat_populate_process_env flag maps Worker
+// dashboard bindings to process.env. This server-only boundary keeps secrets
+// out of every client bundle.
 function workerEnv(): ReadingVisionEnv {
   return {
     OPENAI_API_KEY: process.env.OPENAI_API_KEY,
