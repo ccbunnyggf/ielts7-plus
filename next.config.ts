@@ -6,6 +6,8 @@ const nextConfig: NextConfig = {
   // GitHub Pages has no server runtime. Cloudflare's normal build keeps route
   // handlers available for the Reading Vision API.
   output: isGitHubPages ? 'export' : undefined,
+  // Pages is static: keep the Cloudflare-only .ts route handler out of export.
+  pageExtensions: isGitHubPages ? ['tsx', 'jsx', 'js', 'mdx'] : undefined,
   trailingSlash: true,
   basePath: isGitHubPages ? '/ielts7-plus' : '',
   assetPrefix: isGitHubPages ? '/ielts7-plus/' : undefined,

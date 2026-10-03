@@ -50,6 +50,11 @@ Every push to `main` runs the GitHub Pages workflow automatically. See
 [deployment skills and runbook](docs/deployment-skills.md) for the exact
 tools, configuration, validation steps, and troubleshooting notes.
 
+Plausible Analytics uses the IELTS7+ site's public script URL in the GitHub
+Pages workflow. It runs only on this GitHub Pages path; local development and
+other deployments are excluded. This first stage records pageviews only,
+without learning answers or local study data.
+
 ## Optional Cloudflare Workers deployment
 
 This project uses the Cloudflare Vite plugin and deploys as a Cloudflare Worker

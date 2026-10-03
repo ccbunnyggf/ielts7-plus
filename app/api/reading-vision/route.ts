@@ -35,6 +35,6 @@ export async function POST(request: Request) {
     return Response.json({ ok: false, code: "IMAGE_LOAD_FAILED", message: "Vision 分析请求缺少当前文章图片", status: "failed", reason: "Vision 分析请求缺少当前文章图片" }, { status: 400 });
   }
   const result = await analyseReadingImagesWithVision({ articleId: payload.articleId, contentHash: payload.contentHash, images: payload.images, env: visionEnv() });
-  if (result.status === "failed") return Response.json({ ok: false, code: result.code, message: result.reason, ...result }, { status: result.code === "VISION_NOT_CONFIGURED" ? 503 : 422 });
+  if (result.status === "failed") return Response.json({ ok: false, message: result.reason, ...result }, { status: result.code === "VISION_NOT_CONFIGURED" ? 503 : 422 });
   return Response.json({ ok: true, ...result });
 }

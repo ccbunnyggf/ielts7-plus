@@ -29,6 +29,8 @@ jobs:
       - uses: actions/configure-pages@v5
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build:pages
+        env:
+          PLAUSIBLE_SCRIPT_URL: https://plausible.io/js/pa-CbOUS56nCFZT7XxoS7hdb.js
       - uses: actions/upload-pages-artifact@v3
         with:
           path: ./out

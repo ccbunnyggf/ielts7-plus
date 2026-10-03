@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import { PlausibleAnalytics } from './PlausibleAnalytics';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -11,9 +12,13 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const analyticsScriptUrl = process.env.GITHUB_ACTIONS === 'true' && process.env.NODE_ENV === 'production'
+    ? process.env.PLAUSIBLE_SCRIPT_URL?.trim()
+    : undefined;
+
   return (
     <html lang="zh-CN">
-      <body>{children}</body>
+      <body>{children}{analyticsScriptUrl && <PlausibleAnalytics scriptUrl={analyticsScriptUrl} />}</body>
     </html>
   );
 }
